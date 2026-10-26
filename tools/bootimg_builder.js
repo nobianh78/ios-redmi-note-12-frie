@@ -80,8 +80,14 @@ export function buildBootImage({
   const rawKernel = Buffer.concat([arm64Header, trampolinePayload]);
   const kernelPadded = padToPage(rawKernel, pageSize);
 
-  // 2. Prepare Minimal Ramdisk (early init + shims)
-  const ramdiskPayload = Buffer.from("DARWIN_RAMDISK: Contains /sbin/launchd mock and /dev/sep_mock\n", 'utf-8');
+  // 2. Prepare Ramdisk (Contains Apple Device Tree binary)
+  let ramdiskPayload;
+  if (fs.existsSync('extracted_binaries/fire_devicetree.adt')) {
+    console.log(`[+] Embedding Apple Device Tree (ADT): ${path.resolve('extracted_binaries/fire_devicetree.adt')}`);
+    ramdiskPayload = fs.readFileSync('extracted_binaries/fire_devicetree.adt');
+  } else {
+    ramdiskPayload = Buffer.from("DARWIN_RAMDISK: Contains /sbin/launchd mock and /dev/sep_mock\n", 'utf-8');
+  }
   const ramdiskPadded = padToPage(ramdiskPayload, pageSize);
 
   // 3. Prepare Android Boot Header v2 (1660 bytes standard)

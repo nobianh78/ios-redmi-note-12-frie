@@ -10,6 +10,7 @@
     "rea": "node tools/rea_bridge.js",
     "simulate": "node tools/boot_simulator.js",
     "build:bootimg": "node tools/bootimg_builder.js",
+    "build:adt": "python3.12 tools/adt_builder.py",
     "decompile": "python3.12 tools/kernel_decompiler.py",
     "patch": "python3.12 tools/kernel_patcher.py",
     "test:generate-macho": "node test/fixtures/sample_macho_generator.js",

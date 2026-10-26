@@ -69,29 +69,58 @@ function parseMachO(filePath) {
   console.log(`Analyzing file: ${path.resolve(filePath)}`);
   console.log(`File Size: ${(buf.length / 1024).toFixed(2)} KB (${buf.length} bytes)`);
 
-  if (magicLE === MH_MAGIC_64) {
+  let sliceOffset = 0;
+  let sliceBuf = buf;
+
+  if (magicBE === FAT_MAGIC || magicBE === FAT_CIGAM || magicLE === FAT_MAGIC || magicLE === FAT_CIGAM) {
+    const isFatBE = (magicBE === FAT_MAGIC || magicBE === FAT_CIGAM);
+    const nfat_arch = isFatBE ? buf.readUInt32BE(4) : buf.readUInt32LE(4);
+    console.log(`[+] Format: Universal / Fat Binary (${nfat_arch} architectures)`);
+    
+    let archOffset = 8;
+    for (let a = 0; a < nfat_arch; a++) {
+      const archCpu = isFatBE ? buf.readUInt32BE(archOffset) : buf.readUInt32LE(archOffset);
+      const archSub = isFatBE ? buf.readUInt32BE(archOffset + 4) : buf.readUInt32LE(archOffset + 4);
+      const archFileOff = isFatBE ? buf.readUInt32BE(archOffset + 8) : buf.readUInt32LE(archOffset + 8);
+      const archSize = isFatBE ? buf.readUInt32BE(archOffset + 12) : buf.readUInt32LE(archOffset + 12);
+      
+      console.log(`    -> Slice #${a + 1}: CPU 0x${archCpu.toString(16)} Subtype 0x${archSub.toString(16)} at offset 0x${archFileOff.toString(16)} (${(archSize / 1024 / 1024).toFixed(2)} MB)`);
+      if (archCpu === CPU_TYPE_ARM64) {
+        sliceOffset = archFileOff;
+        sliceBuf = buf.slice(archFileOff, archFileOff + archSize);
+        console.log(`       [Selected ARM64 Slice for Deep Analysis]`);
+        break;
+      }
+      archOffset += 20; // sizeof(struct fat_arch)
+    }
+  }
+
+  const sMagicLE = sliceBuf.readUInt32LE(0);
+  const sMagicBE = sliceBuf.readUInt32BE(0);
+
+  if (sMagicLE === MH_MAGIC_64) {
     isLittleEndian = true;
     is64 = true;
-    console.log(`[+] Format: Mach-O 64-bit (Little Endian - ARM64 standard)`);
-  } else if (magicBE === MH_MAGIC_64) {
+    console.log(`[+] Architecture Slice: Mach-O 64-bit (Little Endian - ARM64 standard)`);
+  } else if (sMagicBE === MH_MAGIC_64) {
     isLittleEndian = false;
     is64 = true;
-    console.log(`[+] Format: Mach-O 64-bit (Big Endian)`);
-  } else if (magicLE === MH_MAGIC) {
+    console.log(`[+] Architecture Slice: Mach-O 64-bit (Big Endian)`);
+  } else if (sMagicLE === MH_MAGIC) {
     isLittleEndian = true;
     is64 = false;
-    console.log(`[+] Format: Mach-O 32-bit (Little Endian)`);
-  } else if (magicBE === MH_MAGIC) {
+    console.log(`[+] Architecture Slice: Mach-O 32-bit (Little Endian)`);
+  } else if (sMagicBE === MH_MAGIC) {
     isLittleEndian = false;
     is64 = false;
-    console.log(`[+] Format: Mach-O 32-bit (Big Endian)`);
+    console.log(`[+] Architecture Slice: Mach-O 32-bit (Big Endian)`);
   } else {
-    console.error(`[!] Unknown Magic: 0x${magicBE.toString(16)}. Not a standard Mach-O binary.`);
+    console.error(`[!] Unknown Magic in slice: 0x${sMagicBE.toString(16)}.`);
     return;
   }
 
-  const readU32 = isLittleEndian ? (o) => buf.readUInt32LE(o) : (o) => buf.readUInt32BE(o);
-  const readU64 = isLittleEndian ? (o) => buf.readBigUInt64LE(o) : (o) => buf.readBigUInt64BE(o);
+  const readU32 = isLittleEndian ? (o) => sliceBuf.readUInt32LE(o) : (o) => sliceBuf.readUInt32BE(o);
+  const readU64 = isLittleEndian ? (o) => sliceBuf.readBigUInt64LE(o) : (o) => sliceBuf.readBigUInt64BE(o);
 
   offset = 4;
   const cputype = readU32(offset); offset += 4;
@@ -126,12 +155,12 @@ function parseMachO(filePath) {
 
   let cmdOffset = offset;
   for (let i = 0; i < ncmds; i++) {
-    if (cmdOffset + 8 > buf.length) break;
+    if (cmdOffset + 8 > sliceBuf.length) break;
     const cmd = readU32(cmdOffset);
     const cmdsize = readU32(cmdOffset + 4);
 
     if (cmd === LC_SEGMENT_64) {
-      const segname = buf.toString('ascii', cmdOffset + 8, cmdOffset + 24).replace(/\0/g, '');
+      const segname = sliceBuf.toString('ascii', cmdOffset + 8, cmdOffset + 24).replace(/\0/g, '');
       const vmaddr = readU64(cmdOffset + 24);
       const vmsize = readU64(cmdOffset + 32);
       const fileoff = readU64(cmdOffset + 40);
@@ -150,11 +179,11 @@ function parseMachO(filePath) {
       });
     } else if (cmd === LC_LOAD_DYLIB) {
       const strOffset = readU32(cmdOffset + 8);
-      const dylibName = buf.toString('ascii', cmdOffset + strOffset, cmdOffset + cmdsize).replace(/\0/g, '');
+      const dylibName = sliceBuf.toString('ascii', cmdOffset + strOffset, cmdOffset + cmdsize).replace(/\0/g, '');
       dylibs.push(dylibName);
     } else if (cmd === LC_LOAD_DYLINKER) {
       const strOffset = readU32(cmdOffset + 8);
-      dylinker = buf.toString('ascii', cmdOffset + strOffset, cmdOffset + cmdsize).replace(/\0/g, '');
+      dylinker = sliceBuf.toString('ascii', cmdOffset + strOffset, cmdOffset + cmdsize).replace(/\0/g, '');
     } else if (cmd === LC_BUILD_VERSION) {
       const platformId = readU32(cmdOffset + 8);
       const minosVal = readU32(cmdOffset + 12);

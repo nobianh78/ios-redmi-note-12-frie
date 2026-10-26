@@ -52,6 +52,7 @@ function padToPage(buf, pageSize) {
 
 export function buildBootImage({
   outputPath = 'out/darwin_fire_boot.img',
+  kernelPath = fs.existsSync('extracted_binaries/kernelcache.macho') ? 'extracted_binaries/kernelcache.macho' : null,
   cmdline = 'console=ttyMT0,921600n8 earlycon=mtk_uart,0x11002000 boot-args="-v amfi_get_out_of_my_way=1 cs_enforcement_disable=1"',
   pageSize = DEFAULT_PAGE_SIZE
 } = {}) {
@@ -60,12 +61,19 @@ export function buildBootImage({
   console.log(`  Target Hardware: Xiaomi Redmi 12 ("fire" / MediaTek Helio G88)`);
   console.log(`============================================================\n`);
 
-  // 1. Prepare Kernel (ARM64 Header + Darwin Trampoline / Payload)
-  const trampolinePayload = Buffer.from(
-    "DarwinFire Trampoline Payload: Initializing MediaTek Helio G88 MT6769 MMIO at 0x11002000...\n" +
-    "Mapping XNU kernelcache and entering Mach subsystem.\n",
-    'utf-8'
-  );
+  // 1. Prepare Kernel Payload
+  let trampolinePayload;
+  if (kernelPath && fs.existsSync(kernelPath)) {
+    console.log(`[+] Packaging REAL Apple Mach-O Kernel: ${path.resolve(kernelPath)}`);
+    trampolinePayload = fs.readFileSync(kernelPath);
+  } else {
+    trampolinePayload = Buffer.from(
+      "DarwinFire Trampoline Payload: Initializing MediaTek Helio G88 MT6769 MMIO at 0x11002000...\n" +
+      "Mapping XNU kernelcache and entering Mach subsystem.\n",
+      'utf-8'
+    );
+  }
+
   const arm64Header = createArm64LinuxHeader(trampolinePayload.length);
   const rawKernel = Buffer.concat([arm64Header, trampolinePayload]);
   const kernelPadded = padToPage(rawKernel, pageSize);

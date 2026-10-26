@@ -11,6 +11,7 @@
     "simulate": "node tools/boot_simulator.js",
     "build:bootimg": "node tools/bootimg_builder.js",
     "decompile": "python3.12 tools/kernel_decompiler.py",
+    "patch": "python3.12 tools/kernel_patcher.py",
     "test:generate-macho": "node test/fixtures/sample_macho_generator.js",
     "rea:setup": "npx.cmd rea-agents setup"
   },

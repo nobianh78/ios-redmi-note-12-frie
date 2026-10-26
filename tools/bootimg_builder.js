@@ -52,7 +52,9 @@ function padToPage(buf, pageSize) {
 
 export function buildBootImage({
   outputPath = 'out/darwin_fire_boot.img',
-  kernelPath = fs.existsSync('extracted_binaries/kernelcache.macho') ? 'extracted_binaries/kernelcache.macho' : null,
+  kernelPath = fs.existsSync('extracted_binaries/kernelcache_patched.macho') 
+    ? 'extracted_binaries/kernelcache_patched.macho' 
+    : (fs.existsSync('extracted_binaries/kernelcache.macho') ? 'extracted_binaries/kernelcache.macho' : null),
   cmdline = 'console=ttyMT0,921600n8 earlycon=mtk_uart,0x11002000 boot-args="-v amfi_get_out_of_my_way=1 cs_enforcement_disable=1"',
   pageSize = DEFAULT_PAGE_SIZE
 } = {}) {

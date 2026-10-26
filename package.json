@@ -9,6 +9,7 @@
     "ipsw": "node tools/ipsw_helper.js",
     "rea": "node tools/rea_bridge.js",
     "simulate": "node tools/boot_simulator.js",
+    "build:bootimg": "node tools/bootimg_builder.js",
     "test:generate-macho": "node test/fixtures/sample_macho_generator.js",
     "rea:setup": "npx.cmd rea-agents setup"
   },

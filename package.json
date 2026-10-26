@@ -1,0 +1,28 @@
+{
+  "name": "darwin-fire",
+  "version": "0.1.0",
+  "description": "Research and porting framework for running Apple Darwin/XNU and iOS userland components on Redmi 12 (fire / MT6769H)",
+  "main": "tools/macho_analyzer.js",
+  "type": "module",
+  "scripts": {
+    "inspect": "node tools/macho_analyzer.js",
+    "ipsw": "node tools/ipsw_helper.js",
+    "rea": "node tools/rea_bridge.js",
+    "simulate": "node tools/boot_simulator.js",
+    "test:generate-macho": "node test/fixtures/sample_macho_generator.js",
+    "rea:setup": "npx.cmd rea-agents setup"
+  },
+  "keywords": [
+    "ios",
+    "xnu",
+    "darwin",
+    "reverse-engineering",
+    "redmi-12",
+    "fire",
+    "mediatek",
+    "arm64",
+    "rea"
+  ],
+  "author": "DarwinFire Research Team",
+  "license": "MIT"
+}

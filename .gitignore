@@ -1,0 +1,13 @@
+# Build outputs (boot images may embed third-party kernels)
+out/
+
+# Apple firmware/kernelcaches and Xiaomi ROM images: proprietary, never commit or publish
+extracted_binaries/
+*.ipsw
+*.im4p
+*.tgz
+
+# Local tool checkouts / drivers (not part of this project)
+rea/
+driver/
+usb_driver/

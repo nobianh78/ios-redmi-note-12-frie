@@ -203,6 +203,7 @@ const target = process.argv[2] || 'kernelcache';
 const out = process.argv[3] || 'extracted_binaries/kernelcache.release';
 const defaultUrl = 'https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77496/774C7319-F63C-4C05-9C6C-49F5F0966540/iPhone_4.7_P3_15.8.8_19H422_Restore.ipsw';
 
-extractRemoteFile(defaultUrl, target, out).catch(err => {
+// node ipsw_remote_extractor.js <name-in-zip> <out> [ipsw-url]
+extractRemoteFile(process.argv[4] || defaultUrl, target, out).catch(err => {
   console.error(`[!] Extractor error:`, err.message);
 });

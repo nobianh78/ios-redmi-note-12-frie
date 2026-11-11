@@ -8,6 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 
 const BOOT_MAGIC = "ANDROID!";
 const DEFAULT_PAGE_SIZE = 2048;
@@ -55,7 +56,12 @@ export function buildBootImage({
   kernelPath = fs.existsSync('extracted_binaries/kernelcache_patched.macho') 
     ? 'extracted_binaries/kernelcache_patched.macho' 
     : (fs.existsSync('extracted_binaries/kernelcache.macho') ? 'extracted_binaries/kernelcache.macho' : null),
-  cmdline = 'console=ttyMT0,921600n8 earlycon=mtk_uart,0x11002000 boot-args="-v amfi_get_out_of_my_way=1 cs_enforcement_disable=1"',
+  // bootopt is parsed by MTK LK to pick the 64-bit kernel jump; without it LK never enters our AArch64 code.
+  cmdline = 'bootopt=64S3,32N2,64N2 console=ttyMT0,921600n8 earlycon=mtk_uart,0x11002000',
+  // Header v2 on fire requires a DTB in boot.img (from recovery_device_xiaomi_fire prebuilt/dtb.img).
+  dtbPath = 'extracted_binaries/fire_dt/dtb.img',
+  ramdiskPath = 'extracted_binaries/fire_devicetree.adt',
+  appendPath = null,
   pageSize = DEFAULT_PAGE_SIZE
 } = {}) {
   console.log(`\n============================================================`);
@@ -76,19 +82,38 @@ export function buildBootImage({
     );
   }
 
-  const arm64Header = createArm64LinuxHeader(trampolinePayload.length);
-  const rawKernel = Buffer.concat([arm64Header, trampolinePayload]);
+  // Payloads that already carry the ARM64 header (magic "ARM\x64" at 0x38, e.g. kernel/heartbeat) are used as-is.
+  const hasHeader = trampolinePayload.length >= 64 && trampolinePayload.readUInt32LE(0x38) === 0x644d5241;
+  let image = hasHeader ? trampolinePayload
+    : Buffer.concat([createArm64LinuxHeader(trampolinePayload.length), trampolinePayload]);
+  if (appendPath) {
+    // XNU payload rides in the gzip'd kernel: header+code padded to 16K, so it lands at the
+    // 16K page after the code (load address is 16K aligned) where heartbeat.c looks for it.
+    const payload = fs.readFileSync(appendPath);
+    image = Buffer.concat([padToPage(image, 0x4000), payload]);
+    image.writeBigUInt64LE(BigInt(image.length), 0x10);   // image_size covers the payload
+    console.log(`[+] Appended payload: ${path.resolve(appendPath)} (${(payload.length / 1048576).toFixed(1)} MB)`);
+  }
+  // fire's LK only boots Image.gz (as TWRP/stock do); a raw Image made slot A fail and fall back.
+  const rawKernel = zlib.gzipSync(image, { level: 9 });
   const kernelPadded = padToPage(rawKernel, pageSize);
 
   // 2. Prepare Ramdisk (Contains Apple Device Tree binary)
   let ramdiskPayload;
-  if (fs.existsSync('extracted_binaries/fire_devicetree.adt')) {
-    console.log(`[+] Embedding Apple Device Tree (ADT): ${path.resolve('extracted_binaries/fire_devicetree.adt')}`);
-    ramdiskPayload = fs.readFileSync('extracted_binaries/fire_devicetree.adt');
+  if (fs.existsSync(ramdiskPath)) {
+    console.log(`[+] Ramdisk: ${path.resolve(ramdiskPath)}`);
+    ramdiskPayload = fs.readFileSync(ramdiskPath);
   } else {
     ramdiskPayload = Buffer.from("DARWIN_RAMDISK: Contains /sbin/launchd mock and /dev/sep_mock\n", 'utf-8');
   }
   const ramdiskPadded = padToPage(ramdiskPayload, pageSize);
+
+  if (!fs.existsSync(dtbPath)) throw new Error(`Missing DTB ${dtbPath}: LK on fire refuses header v2 images without one`);
+  const dtb = fs.readFileSync(dtbPath);
+  const dtbPadded = padToPage(dtb, pageSize);
+
+  // fire BoardConfig: base 0x40078000, kernel +0x8000, ramdisk +0x07c08000, tags +0x0bc08000, dtb +0x01f00000 (mkbootimg default)
+  const BASE = 0x40078000;
 
   // 3. Prepare Android Boot Header v2 (1660 bytes standard)
   const headerBuf = Buffer.alloc(pageSize);
@@ -98,18 +123,18 @@ export function buildBootImage({
   headerBuf.write(BOOT_MAGIC, off, 8, 'ascii'); off += 8;
   // kernel_size
   headerBuf.writeUInt32LE(rawKernel.length, off); off += 4;
-  // kernel_addr (0x40080000 physical base)
-  headerBuf.writeUInt32LE(0x40080000, off); off += 4;
+  // kernel_addr
+  headerBuf.writeUInt32LE(BASE + 0x8000, off); off += 4;
   // ramdisk_size
   headerBuf.writeUInt32LE(ramdiskPayload.length, off); off += 4;
-  // ramdisk_addr (0x44000000)
-  headerBuf.writeUInt32LE(0x44000000, off); off += 4;
+  // ramdisk_addr
+  headerBuf.writeUInt32LE(BASE + 0x07c08000, off); off += 4;
   // second_size
   headerBuf.writeUInt32LE(0, off); off += 4;
   // second_addr
   headerBuf.writeUInt32LE(0, off); off += 4;
-  // tags_addr (0x40000100)
-  headerBuf.writeUInt32LE(0x40000100, off); off += 4;
+  // tags_addr
+  headerBuf.writeUInt32LE(BASE + 0x0bc08000, off); off += 4;
   // page_size
   headerBuf.writeUInt32LE(pageSize, off); off += 4;
   // header_version (v2)
@@ -131,12 +156,12 @@ export function buildBootImage({
   // header_size
   headerBuf.writeUInt32LE(1660, off); off += 4;
   // dtb_size
-  headerBuf.writeUInt32LE(0, off); off += 4;
+  headerBuf.writeUInt32LE(dtb.length, off); off += 4;
   // dtb_addr
-  headerBuf.writeBigUInt64LE(0x43000000n, off); off += 8;
+  headerBuf.writeBigUInt64LE(BigInt(BASE + 0x01f00000), off); off += 8;
 
-  // Combine into single boot.img
-  const bootImg = Buffer.concat([headerBuf, kernelPadded, ramdiskPadded]);
+  // v2 layout: header | kernel | ramdisk | second(0) | recovery_dtbo(0) | dtb
+  const bootImg = Buffer.concat([headerBuf, kernelPadded, ramdiskPadded, dtbPadded]);
 
   const outDir = path.dirname(outputPath);
   if (!fs.existsSync(outDir)) {
@@ -164,5 +189,8 @@ export function buildBootImage({
 
 // Direct execution from CLI
 if (process.argv[1].endsWith('bootimg_builder.js')) {
-  buildBootImage();
+  // Optional: node bootimg_builder.js <kernel.bin> <out.img> [ramdisk|-] [append-to-kernel]
+  const [kernelPath, outputPath, rd, appendPath] = process.argv.slice(2);
+  const ramdiskPath = rd && rd !== '-' ? rd : undefined;
+  buildBootImage(kernelPath ? { kernelPath, outputPath, ramdiskPath, appendPath } : {});
 }

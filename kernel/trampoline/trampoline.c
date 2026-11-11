@@ -47,7 +47,7 @@ void darwin_trampoline_c_entry(uint64_t fdt_addr) {
     g_darwin_boot_args.video.v_rowBytes = 1080 * 4;
 
     // Attach Apple Device Tree (ADT)
-    g_darwin_boot_args.deviceTreeP = (void *)0x43800000;    // ADT physical buffer in RAM
+    g_darwin_boot_args.deviceTreeP = 0x43800000;            // ADT physical buffer in RAM
     g_darwin_boot_args.deviceTreeLength = 1544;             // Size of fire_devicetree.adt
 
     // Kernel command-line arguments

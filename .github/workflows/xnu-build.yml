@@ -1,0 +1,48 @@
+# Build Apple's open-source XNU kernel (APSL, apple-oss-distributions/xnu) on a GitHub-hosted
+# macOS runner, which runs on real Apple hardware, as the Xcode toolchain requires.
+# First milestone: an unmodified ARM64 VMAPPLE build, the least hardware-specific XNU platform
+# and the base for a future MT6768 ("fire") platform layer.
+name: xnu-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_config:
+        description: RELEASE or DEVELOPMENT
+        default: DEVELOPMENT
+        required: true
+  push:
+    branches: [main]
+    paths: ['.github/workflows/xnu-build.yml', 'xnu/**']
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch darwin-xnu-build
+        run: git clone --depth 1 https://github.com/blacktop/darwin-xnu-build.git build-xnu
+
+      - name: Build XNU (ARM64 / VMAPPLE)
+        working-directory: build-xnu
+        env:
+          KERNEL_CONFIG: ${{ github.event.inputs.kernel_config || 'DEVELOPMENT' }}
+          ARCH_CONFIG: ARM64
+          MACHINE_CONFIG: VMAPPLE
+        run: ./build.sh
+
+      - name: List build products
+        if: always()
+        working-directory: build-xnu
+        run: find . -maxdepth 4 \( -name 'kernel*' -o -name '*.kc.*' \) -type f -exec ls -la {} \; | head -50
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-arm64-vmapple
+          path: |
+            build-xnu/build/**/kernel*
+            build-xnu/fakeroot/**/kernel*
+          if-no-files-found: warn

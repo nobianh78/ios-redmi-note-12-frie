@@ -31,7 +31,13 @@ jobs:
           KERNEL_CONFIG: ${{ github.event.inputs.kernel_config || 'DEVELOPMENT' }}
           ARCH_CONFIG: ARM64
           MACHINE_CONFIG: VMAPPLE
-        run: ./build.sh
+        # On failure, surface the log tail as annotations (readable via the public API without login).
+        run: |
+          set -o pipefail
+          ./build.sh 2>&1 | tee build.log || {
+            tail -n 40 build.log | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^/::error::/'
+            exit 1
+          }
 
       - name: List build products
         if: always()

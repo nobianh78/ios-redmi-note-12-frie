@@ -43,6 +43,9 @@ jobs:
           grep -n "ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 \|OTHER_CFLAGS=\"-mkernel" build.sh
           test "$(grep -c 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA' build.sh)" -ge 1
           test "$(grep -c "mcpu=$MCPU\" " build.sh)" -ge 1
+          # Patch the xnu tree for Xcode 16 right after build.sh clones it.
+          perl -pi -e 's|^(\s*git clone --branch "\$\{XNU_VERSION\}" https://github.com/apple-oss-distributions/xnu.git "\$\{WORK_DIR\}/xnu")\s*$|$1\n        bash "$ENV{GITHUB_WORKSPACE}/xnu/fix-xcode16.sh" "\${WORK_DIR}/xnu"\n|' build.sh
+          grep -n 'fix-xcode16.sh' build.sh
 
       - name: Deps (oldest Xcode available)
         run: |

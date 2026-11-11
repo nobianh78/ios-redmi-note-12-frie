@@ -1,8 +1,13 @@
 # Build Apple's open-source XNU kernel (APSL, apple-oss-distributions/xnu) on a GitHub-hosted
 # macOS runner, which runs on real Apple hardware, as the Xcode toolchain requires.
-# Mirrors the upstream CI of blacktop/darwin-xnu-build (.github/workflows/c-cpp.yml).
-# First milestone: an unmodified ARM64 VMAPPLE build, the least hardware-specific XNU platform
-# and the base for a future MT6768 ("fire") platform layer.
+# Uses blacktop/darwin-xnu-build. Target: plain arm64 (no PAC) for the MT6768's Cortex-A75/A55.
+#
+# History:
+#  - xnu 26.5 arm64e built fine but hangs on the phone: ARMv8.2 cores have no retab/braa (PAC).
+#  - xnu 26.5 with the arch forced to arm64 compiles but fails to link (vm_first_phys/vm_last_phys
+#    missing from lowmem_vectors.o): that tree only links as arm64e.
+#  - Now: xnu-8796 (macOS 13.5), the iOS 16-era tree that other ports have built as plain arm64,
+#    with Xcode 15 (Xcode 16's iig emits IORPC.kernelContent, which xnu-8796 lacks).
 name: xnu-build
 
 on:
@@ -12,12 +17,12 @@ on:
     paths: ['.github/workflows/xnu-build.yml', 'xnu/**']
 
 env:
-  MACOS_VERSION: '26.5'          # selects the xnu tag + KDK; unset makes build.sh prompt (gum choose)
-  XCODE_APP: /Applications/Xcode_26.1.app
+  MACOS_VERSION: '13.5'          # xnu-8796; unset makes build.sh prompt (gum choose)
+  MCPU: cortex-a55
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14            # still ships Xcode 15.x
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -25,42 +30,46 @@ jobs:
       - name: Fetch darwin-xnu-build
         run: git clone --depth 1 https://github.com/blacktop/darwin-xnu-build.git build-xnu
 
-      # MT6768's Cortex-A75/A55 (ARMv8.2) have no pointer authentication: an arm64e kernel dies on its
-      # first retab/braa (measured: ~29k such instructions in the default build). Build plain arm64 for
-      # Cortex-A55 instead. upstream build.sh only exposes this override for --lib, so add it to the
-      # kernel `make install` and build libfirehose_kernel for arm64 as well.
+      # Force plain arm64 for the kernel (upstream only exposes this override for --lib) and build
+      # libfirehose_kernel for arm64 with the same CPU target so it links into that kernel.
       - name: Patch build.sh for plain arm64 (no PAC)
         working-directory: build-xnu
         run: |
-          perl -0pi -e 's/(make install -j8 VERBOSE=YES "\$\{CTF_TOOL_OVERRIDES\[\@\]\}") SDKROOT=macosx/$1 ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA="-mcpu=cortex-a55" SDKROOT=macosx/' build.sh
-          perl -pi -e 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64 arm64e" VALID_ARCHS="x86_64 arm64 arm64e"/' build.sh
-          grep -n 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 \|ARCHS="x86_64 arm64 arm64e"' build.sh
+          perl -0pi -e 's/(make install -j8 VERBOSE=YES "\$\{CTF_TOOL_OVERRIDES\[\@\]\}") SDKROOT=macosx/$1 ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA="-mcpu=$ENV{MCPU}" SDKROOT=macosx/' build.sh
+          perl -pi -e 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="arm64" VALID_ARCHS="arm64" OTHER_CFLAGS="-mkernel -nostdinc -Wno-packed -mcpu=$ENV{MCPU}"/' build.sh
+          grep -n "ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 \|OTHER_CFLAGS=\"-mkernel" build.sh
           test "$(grep -c 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA' build.sh)" -ge 1
+          test "$(grep -c "mcpu=$MCPU\" " build.sh)" -ge 1
 
-      - name: Deps
+      - name: Deps (Xcode 15)
         run: |
           brew tap blacktop/tap
-          brew trust blacktop/tap
-          brew install bash blacktop/tap/ipsw
-          brew uninstall cmake || true
-          brew install cmake
-          sudo xcode-select -s "$XCODE_APP"
+          brew trust blacktop/tap || true
+          brew install bash jq gum cmake ninja blacktop/tap/ipsw
+          # build.sh only checks that xcodes exists; Xcode is preinstalled on the runner
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_15*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
 
       - name: Build XNU (ARM64 / VMAPPLE)
         working-directory: build-xnu
         env:
           MACHINE_CONFIG: VMAPPLE
-          KC_FILTER: 'com.apple.driver.SEPHibernation|com.apple.iokit.IOACPIFamily'
-        # On failure, surface the log tail as annotations (GitHub shows at most 10 per step,
-        # readable via the public API without login).
+        # On failure, surface the errors as annotations (readable via the public API without login).
+        # GitHub keeps only 10 per step, so undefined symbols are folded into one line.
         run: |
           set -o pipefail
           bash build.sh 2>&1 | tee build.log || {
-            grep -v '^\s*$' build.log | tail -n 10 | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^/::error::/'
+            syms=$(grep -o '"_[A-Za-z0-9_]*", referenced' build.log | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+            [ -n "$syms" ] && echo "::error::undefined symbols: $syms"
+            grep -E 'error:|Error [0-9]' build.log | sed -e 's/\x1b\[[0-9;]*m//g' | sort -u | head -n 8 | sed 's/^/::error::/'
             exit 1
           }
           ls -lah fakeroot/System/Library/Kernels/
-          file fakeroot/System/Library/Kernels/kernel.release.vmapple   # expect arm64, not arm64e
+          file fakeroot/System/Library/Kernels/kernel*   # expect arm64, not arm64e
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

@@ -39,3 +39,20 @@ makedef="$src/makedefs/MakeInc.def"
 perl -pi -e 's/^(\s*LDFLAGS_KERNEL_ONLY \+= -rdynamic) -Wl,-force_load,\$\(KDKROOT\)\/System\/Library\/KernelSupport\/lib\S+\.a\s*$/$1\n/' "$makedef"
 ! grep -q 'force_load,$(KDKROOT)/System/Library/KernelSupport' "$makedef" || { echo "fix-xcode16: closed lib force_load still present"; exit 1; }
 echo "fix-xcode16: building arm64 machine layer from source (nos_arm_asm nos_arm_pmap, no PPL, no KDK lib)"
+
+# 4. Three nos_arm files are not published: amcc_rorgn_ppl.c (PPL only, PPL is off), amcc_rorgn_common.c
+#    (Apple AMCC read-only region; MT6768 has no AMCC) and kpc.c (Apple PMU counters).
+#    Stub the AMCC region with the same semantics xnu uses when KTRR/CTRR is off, and drop kperf/kpc.
+cat > "$src/osfmk/arm64/amcc_rorgn_common.c" <<'EOF'
+/* Stub for non-Apple SoCs: no AMCC/CTRR read-only region (matches xnu's !KTRR && !CTRR behaviour). */
+#include <mach/vm_types.h>
+#include <stdbool.h>
+vm_offset_t rorgn_begin = 0;
+vm_offset_t rorgn_end = 0;
+void rorgn_stash_range(void) {}
+void rorgn_lockdown(void) {}
+bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval) { (void)addr; (void)size; return defval; }
+EOF
+perl -pi -e 's/^(#\s*PERF_DBG_BASE\s*=.*?) kperf kpc /$1 /' "$master"
+! grep -q 'PERF_DBG_BASE.*kpc' "$master" || { echo "fix-xcode16: kpc still enabled"; exit 1; }
+echo "fix-xcode16: stubbed amcc_rorgn_common.c, disabled kperf/kpc"

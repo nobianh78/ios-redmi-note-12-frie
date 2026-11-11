@@ -1,5 +1,6 @@
 #!/bin/bash
-# Make xnu-8796 (macOS 13.5) build with Xcode 16's clang.
+# Make xnu-8796 (macOS 13.5) build with Xcode 16's clang as plain arm64 (no PAC) for non-Apple cores,
+# entirely from open source.
 # Usage: fix-xcode16.sh <xnu-source-dir>
 #
 # 1. uio_stackbuf_t is `char` with 8-byte alignment; newer clang rejects arrays of it
@@ -23,3 +24,18 @@ pmap_h="$src/osfmk/arm/pmap/pmap.h"
 perl -0pi -e 's/(#if HAS_APPLE_PAC\s*\n\s*bool disable_jop;\s*\n#else\s*\n\s*bool )reserved10;/${1}reserved10_nopac;/' "$pmap_h"
 grep -q 'reserved10_nopac' "$pmap_h" || { echo "fix-xcode16: pmap.h reserved10 fix did not apply"; exit 1; }
 echo "fix-xcode16: renamed duplicate pmap reserved10 (no-PAC build)"
+
+# 3. Build the ARM64 machine-dependent layer from source instead of Apple's closed library.
+#    The macOS config leaves the 20 files gated on nos_arm_asm / nos_arm_pmap in osfmk/conf/files.arm64
+#    (start.s, locore.s, pmap, copyio, ...) out of the build and force-loads a prebuilt, arm64e-only
+#    lib<MACHINE>.os.<CONFIG>.a from the KDK (makedefs/MakeInc.def). Enable the open sources, and drop
+#    PPL (config_pmap_ppl): it needs Apple's APRR/GXF hardware, which Cortex cores do not have.
+master="$src/config/MASTER.arm64.MacOSX"
+perl -pi -e 's/^(#\s*KERNEL_BASE\s*=\s*\[\s*arm64) config_pmap_ppl /$1 nos_arm_asm nos_arm_pmap /' "$master"
+grep -q 'KERNEL_BASE.*nos_arm_asm nos_arm_pmap' "$master" || { echo "fix-xcode16: MASTER nos_arm fix did not apply"; exit 1; }
+! grep -q 'KERNEL_BASE.*config_pmap_ppl' "$master" || { echo "fix-xcode16: config_pmap_ppl still set"; exit 1; }
+
+makedef="$src/makedefs/MakeInc.def"
+perl -pi -e 's/^(\s*LDFLAGS_KERNEL_ONLY \+= -rdynamic) -Wl,-force_load,\$\(KDKROOT\)\/System\/Library\/KernelSupport\/lib\S+\.a\s*$/$1\n/' "$makedef"
+! grep -q 'force_load,$(KDKROOT)/System/Library/KernelSupport' "$makedef" || { echo "fix-xcode16: closed lib force_load still present"; exit 1; }
+echo "fix-xcode16: building arm64 machine layer from source (nos_arm_asm nos_arm_pmap, no PPL, no KDK lib)"

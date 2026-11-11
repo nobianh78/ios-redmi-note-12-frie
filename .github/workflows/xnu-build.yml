@@ -25,6 +25,18 @@ jobs:
       - name: Fetch darwin-xnu-build
         run: git clone --depth 1 https://github.com/blacktop/darwin-xnu-build.git build-xnu
 
+      # MT6768's Cortex-A75/A55 (ARMv8.2) have no pointer authentication: an arm64e kernel dies on its
+      # first retab/braa (measured: ~29k such instructions in the default build). Build plain arm64 for
+      # Cortex-A55 instead. upstream build.sh only exposes this override for --lib, so add it to the
+      # kernel `make install` and build libfirehose_kernel for arm64 as well.
+      - name: Patch build.sh for plain arm64 (no PAC)
+        working-directory: build-xnu
+        run: |
+          perl -0pi -e 's/(make install -j8 VERBOSE=YES "\$\{CTF_TOOL_OVERRIDES\[\@\]\}") SDKROOT=macosx/$1 ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA="-mcpu=cortex-a55" SDKROOT=macosx/' build.sh
+          perl -pi -e 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64 arm64e" VALID_ARCHS="x86_64 arm64 arm64e"/' build.sh
+          grep -n 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 \|ARCHS="x86_64 arm64 arm64e"' build.sh
+          test "$(grep -c 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA' build.sh)" -ge 1
+
       - name: Deps
         run: |
           brew tap blacktop/tap
@@ -48,6 +60,7 @@ jobs:
             exit 1
           }
           ls -lah fakeroot/System/Library/Kernels/
+          file fakeroot/System/Library/Kernels/kernel.release.vmapple   # expect arm64, not arm64e
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

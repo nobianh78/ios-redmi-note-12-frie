@@ -70,6 +70,7 @@ jobs:
         run: |
           set -o pipefail
           report() {
+            set +e   # the runner uses bash -e; a grep with no match must not abort the report
             syms=$(grep -o '"_[A-Za-z0-9_]*", referenced' build.log | cut -d'"' -f2 | sort -u | tr '\n' ' ')
             [ -n "$syms" ] && echo "::error::undefined symbols: $syms"
             grep -E 'error:|Error [0-9]' build.log | sed -e 's/\x1b\[[0-9;]*m//g' | sort -u | head -n 7 | sed 's/^/::error::/'

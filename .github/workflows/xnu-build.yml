@@ -44,7 +44,7 @@ jobs:
           test "$(grep -c 'ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG=arm64 CFLAGS_EXTRA' build.sh)" -ge 1
           test "$(grep -c "mcpu=$MCPU\" " build.sh)" -ge 1
 
-      - name: Deps (Xcode 15)
+      - name: Deps (oldest Xcode available)
         run: |
           brew tap blacktop/tap
           brew trust blacktop/tap || true
@@ -54,8 +54,9 @@ jobs:
           sudo chmod +x /usr/local/bin/xcodes
           ls -d /Applications/Xcode*.app
           echo "::error::available Xcodes: $(ls -d /Applications/Xcode*.app | xargs -n1 basename | tr '\n' ' ')"
-          XC=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)
-          [ -n "$XC" ] || { echo "::error::no Xcode 15 on this image (xnu-8796 needs Xcode 15's iig)"; exit 1; }
+          # No Xcode 15 on any current runner image; use the oldest Xcode 16 and see what breaks.
+          XC=$(ls -d /Applications/Xcode_15*.app /Applications/Xcode_16.0.app 2>/dev/null | sort -V | head -1)
+          [ -n "$XC" ] || { echo "::error::no Xcode 15/16.0 on this image"; exit 1; }
           sudo xcode-select -s "$XC"
           xcodebuild -version
 

@@ -6,8 +6,11 @@
 #  - xnu 26.5 arm64e built fine but hangs on the phone: ARMv8.2 cores have no retab/braa (PAC).
 #  - xnu 26.5 with the arch forced to arm64 compiles but fails to link (vm_first_phys/vm_last_phys
 #    missing from lowmem_vectors.o): that tree only links as arm64e.
-#  - Now: xnu-8796 (macOS 13.5), the iOS 16-era tree that other ports have built as plain arm64,
-#    with Xcode 15 (Xcode 16's iig emits IORPC.kernelContent, which xnu-8796 lacks).
+#    Root cause (makedefs/MakeInc.def:1175-1185): VMAPPLE enables SPTM, which links the closed,
+#    arm64e-only libsptm_xnu / libTrustedExecutionMonitor_Kernel from the KDK. Modern xnu cannot
+#    be built as plain arm64 for non-Apple silicon.
+#  - Now: xnu-8796 (macOS 13.5), the pre-SPTM iOS 16-era tree that other ports have built as plain
+#    arm64, with Xcode 15 (Xcode 16's iig emits IORPC.kernelContent, which xnu-8796 lacks).
 name: xnu-build
 
 on:
@@ -22,7 +25,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14            # still ships Xcode 15.x
+    runs-on: macos-15            # macos-14 runners were retired; check whether this image still ships Xcode 15
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +53,9 @@ jobs:
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
           ls -d /Applications/Xcode*.app
-          XC=$(ls -d /Applications/Xcode_15*.app | sort -V | tail -1)
+          echo "::error::available Xcodes: $(ls -d /Applications/Xcode*.app | xargs -n1 basename | tr '\n' ' ')"
+          XC=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XC" ] || { echo "::error::no Xcode 15 on this image (xnu-8796 needs Xcode 15's iig)"; exit 1; }
           sudo xcode-select -s "$XC"
           xcodebuild -version
 

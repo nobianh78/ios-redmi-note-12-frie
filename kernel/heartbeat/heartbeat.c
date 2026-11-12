@@ -209,14 +209,27 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     fbcon_puts("XNUFLAT1\n");
     if (!video->base) { fbcon_puts("no video surface\n"); return 0; }
 
-    uint64_t phys_base = initrd + PAYLOAD_HDR;
-    if (phys_base & 0x3fff) { fbcon_puts("payload not 16K aligned\n"); return 0; }
-    if (p->entry_offset >= p->kernel_size || p->adt_offset + p->adt_size < p->adt_offset) {
+    uint64_t src = initrd + PAYLOAD_HDR;
+    if (src & 0x3fff) { fbcon_puts("payload not 16K aligned\n"); return 0; }
+    if (p->entry_offset >= p->kernel_size || p->adt_offset < PAYLOAD_HDR ||
+        p->adt_offset + p->adt_size < p->adt_offset) {
         fbcon_puts("bad payload header\n"); return 0;
     }
 
+    /* start.s maps the kernel with 32 MB L2 blocks (16K granule): VA and PA must share their offset
+     * inside a 32 MB block, as iBoot guarantees. Our payload sits wherever LK put it, so copy kernel+ADT
+     * to the first address above it with the same offset as virtBase (no overlap: dst >= src end). */
+    const uint64_t L2_BLOCK = 0x2000000ull;
+    uint64_t len = p->adt_offset + p->adt_size - PAYLOAD_HDR;
+    uint64_t off = p->virt_base & (L2_BLOCK - 1);
+    uint64_t phys_base = ((src + len - off + L2_BLOCK - 1) & ~(L2_BLOCK - 1)) + off;
+    if (phys_base + len + 0x8000 > XNU_RAM_END) { fbcon_puts("no room to relocate kernel\n"); return 0; }
+    for (uint64_t i = 0; i < len; i += 8) *(volatile uint64_t *)(phys_base + i) = *(volatile uint64_t *)(src + i);
+    __asm__ volatile("dsb sy" ::: "memory");
+    fbcon_puts("relocated "); fbcon_hex(src); fbcon_puts(" -> "); fbcon_hex(phys_base); fbcon_putc('\n');
+
     /* boot_args in the 16K page after the ADT; XNU may reuse everything below topOfKernelData. */
-    uint64_t adt_phys = initrd + p->adt_offset;
+    uint64_t adt_phys = phys_base + (p->adt_offset - PAYLOAD_HDR);
     uint64_t ba_phys  = PAGE16K(adt_phys + p->adt_size);
     darwin_arm64_boot_args_t *ba = (darwin_arm64_boot_args_t *)ba_phys;
     for (uint64_t i = 0; i < sizeof(*ba); i++) ((volatile uint8_t *)ba)[i] = 0;
@@ -262,6 +275,20 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     fbcon_puts("\njumping to XNU...\n");
     __asm__ volatile("dsb sy" ::: "memory");
 
+    /* LK ran with caches on; everything XNU will read once its MMU/caches are on (kernel image,
+     * ADT, boot_args, and the page tables XNU builds with caches off) may be shadowed by stale lines.
+     * Invalidate (not clean: dirty stale lines must not be written back) the whole range to PoC, as
+     * Linux does for its early page tables. Caches are off here, so no new lines get allocated. */
+    {
+        uint64_t ctr, line;
+        __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+        line = 4ull << ((ctr >> 16) & 0xf);              /* DminLine, in bytes */
+        uint64_t end = ba->topOfKernelData;
+        for (uint64_t a = phys_base & ~(line - 1); a < end; a += line) __asm__ volatile("dc ivac, %0" :: "r"(a) : "memory");
+        __asm__ volatile("dsb sy; isb" ::: "memory");
+        fbcon_puts("dcache invalidated: "); fbcon_hex(phys_base); fbcon_puts("-"); fbcon_hex(end); fbcon_putc('\n');
+    }
+
     if (((uint64_t)exc_vectors & 0x7ff) == 0) __asm__ volatile("msr vbar_el1, %0; isb" :: "r"(exc_vectors));
     else { fbcon_puts("vectors misaligned: "); fbcon_hex((uint64_t)exc_vectors); fbcon_puts(" (no fault report)\n"); }
     xnu_jump(entry, ba_phys);
@@ -291,7 +318,21 @@ void heartbeat_main(uint64_t fdt_addr) {
     fbcon_puts("FDT fb: ");
     if (have_fb) { fbcon_hex(fb); fbcon_puts(" +"); fbcon_hex(fb_size); }
     else fbcon_puts("not found");
-    fbcon_puts("\ncntfrq: "); fbcon_dec(cntfrq()); fbcon_puts("\n\n");
+    fbcon_puts("\ncntfrq: "); fbcon_dec(cntfrq()); fbcon_puts("\n");
+    {   /* CPU feature IDs: XNU stops at MMU enable; check granule / PAN / PA-size support */
+        uint64_t midr, mpidr, mmfr0, mmfr1, mmfr2, pfr0;
+        __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+        __asm__ volatile("mrs %0, id_aa64mmfr1_el1" : "=r"(mmfr1));
+        __asm__ volatile("mrs %0, id_aa64mmfr2_el1" : "=r"(mmfr2));
+        __asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(pfr0));
+        fbcon_puts("MIDR "); fbcon_hex(midr); fbcon_puts(" MPIDR "); fbcon_hex(mpidr);
+        fbcon_puts("\nMMFR0 "); fbcon_hex(mmfr0);
+        fbcon_puts("\nMMFR1 "); fbcon_hex(mmfr1);
+        fbcon_puts("\nMMFR2 "); fbcon_hex(mmfr2);
+        fbcon_puts("\nPFR0  "); fbcon_hex(pfr0); fbcon_puts("\n\n");
+    }
     print_layers("OVL0", en0, ovl0);
     print_layers("OVL0_2L", en2, ovl2l);
     fbcon_puts("\nsurfaces: "); fbcon_dec(fbcon_count()); fbcon_puts("\n\n");

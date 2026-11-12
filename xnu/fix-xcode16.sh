@@ -42,7 +42,8 @@ echo "fix-xcode16: building arm64 machine layer from source (nos_arm_asm nos_arm
 
 # 4. Three nos_arm files are not published: amcc_rorgn_ppl.c (PPL only, PPL is off), amcc_rorgn_common.c
 #    (Apple AMCC read-only region; MT6768 has no AMCC) and kpc.c (Apple PMU counters).
-#    Stub the AMCC region with the same semantics xnu uses when KTRR/CTRR is off, and drop kperf/kpc.
+#    Stub the AMCC region with the same semantics xnu uses when KTRR/CTRR is off, and supply a kpc.c
+#    that reports zero counters (disabling kpc instead breaks ast.c, which always includes kperf_kpc.h).
 cat > "$src/osfmk/arm64/amcc_rorgn_common.c" <<'EOF'
 /* Stub for non-Apple SoCs: no AMCC/CTRR read-only region (matches xnu's !KTRR && !CTRR behaviour). */
 #include <mach/vm_types.h>
@@ -53,6 +54,5 @@ void rorgn_stash_range(void) {}
 void rorgn_lockdown(void) {}
 bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval) { (void)addr; (void)size; return defval; }
 EOF
-perl -pi -e 's/^(#\s*PERF_DBG_BASE\s*=.*?) kperf kpc /$1 /' "$master"
-! grep -q 'PERF_DBG_BASE.*kpc' "$master" || { echo "fix-xcode16: kpc still enabled"; exit 1; }
-echo "fix-xcode16: stubbed amcc_rorgn_common.c, disabled kperf/kpc"
+cp "$(dirname "$0")/kpc_stub.c" "$src/osfmk/arm64/kpc.c"
+echo "fix-xcode16: stubbed amcc_rorgn_common.c and arm64 kpc.c"

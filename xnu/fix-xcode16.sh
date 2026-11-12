@@ -266,9 +266,16 @@ grep -q '^	l2_ptp_virt\[L2_TABLE_INDEX(0x7c000000ULL)\] = ARM_TTE_BOOT_BLOCK | 0
 perl -pi -e '
   if (!$d && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ .= "\tdf_mark(9);\n"; $d = 1; }
   elsif (!$e && /^\tPE_create_console\(\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }
-  elsif (!$f && /^\tPE_init_printf\(FALSE\);/) { $_ .= "\tdf_mark(11);\n"; $f = 1; }
-  elsif (!$g && /^\tPE_init_platform\(TRUE, &BootCpuData\);/) { $_ .= "\tdf_mark(12);\n"; $g = 1; }
-  elsif (!$h && /^\tmachine_startup\(args\);/) { $_ = "\tdf_mark(13);\n$_"; $h = 1; }
 ' "$arm_init"
-test "$(grep -c 'df_mark(\(9\|1[0-3]\));' "$arm_init")" -eq 5 || { echo "fix-xcode16: expected df_mark 9-13 in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
+test "$(grep -c 'df_mark(\(9\|10\));' "$arm_init")" -eq 2 || { echo "fix-xcode16: expected df_mark 9-10 in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
+#        Fire stopped inside PE_create_console (10 bands). Marks 11-13 go inside initialize_screen:
+#        after the framebuffer io_map, after gc_initialize, after the op switch.
+vc_c="$(dirname "$arm_init")/../console/video_console.c"
+perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
+perl -pi -e '
+  if (!$a && /^\t\t\tnewVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
+  elsif (!$b && /^\t\t\tgc_initialize\(&vinfo\);/) { $_ .= "\t\t\tdf_mark(12);\n"; $b = 1; }
+  elsif (!$c && /^\tgraphics_now = gc_graphics_boot && !gc_desire_text;/) { $_ = "\tdf_mark(13);\n$_"; $c = 1; }
+' "$vc_c"
+test "$(grep -c 'df_mark(1[1-3]);' "$vc_c")" -eq 3 || { echo "fix-xcode16: expected df_mark 11-13 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

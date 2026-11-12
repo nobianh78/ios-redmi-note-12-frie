@@ -179,6 +179,7 @@ struct xnu_payload {
 /* shortcut: XNU gets one contiguous RAM range from physBase up to just below the framebuffer;
  * MTK reserved carve-outs (TEE/ATF/modem) inside it are not excluded yet. Feed them via the ADT once XNU gets that far. */
 #define XNU_RAM_END   0x7c000000ull
+#define XNU_SAFE_RAM  0x8000000ull   /* 128 MB handed to XNU; see boot_xnu() */
 
 extern void xnu_jump(uint64_t entry_phys, uint64_t boot_args_phys);
 extern char exc_vectors[];
@@ -238,7 +239,11 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     ba->Version          = kBootArgsVersion2;
     ba->virtBase         = p->virt_base;
     ba->physBase         = phys_base;
-    ba->memSize          = XNU_RAM_END - phys_base;
+    /* XNU stopped inside arm_vm_init with ~950 MB that still contains MTK carve-outs (TEE/ATF/modem,
+     * addresses unknown without root). Hand it only 128 MB from physBase: that span holds just LK's
+     * leftovers (ramdisk 0x47c80000, FDT 0x4bc80000 is above it), which XNU may overwrite. */
+    ba->memSize          = XNU_SAFE_RAM;
+    fbcon_puts("memSize: "); fbcon_hex(ba->memSize); fbcon_putc('\n');
     ba->topOfKernelData  = PAGE16K(ba_phys + sizeof(*ba));
     ba->video.v_baseAddr = video->base;
     ba->video.v_display  = 1;

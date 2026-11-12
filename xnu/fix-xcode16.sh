@@ -222,6 +222,8 @@ void df_mark(int n);
 void
 df_mark(int n)
 {
+	/* the V=P tables get rebuilt in arm_vm_init: drop any stale TLB entry for the framebuffer block */
+	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(0x7ce6a000ULL + (1300ULL + (uint64_t)n * 60) * 4320);
 	for (int i = 0; i < (40 * 4320) / 4; i++) {
 		p[i] = (uint32_t)(uintptr_t)&p[i];
@@ -249,6 +251,12 @@ echo "fix-xcode16: post-MMU breadcrumbs: V=P fb block, DF_MARK_C 4, df_mark 5-8 
 arm_vm_init_c="$src/osfmk/arm64/arm_vm_init.c"
 perl -0pi -e 's|\tset_mmu_ttb\(invalid_ttep & TTBR_BADDR_MASK\);\n|\t/* fix-xcode16: fire bring-up keeps the bootstrap V=P tables in TTBR0 for df_mark */\n|' "$arm_vm_init_c"
 grep -q 'fire bring-up keeps the bootstrap V=P tables' "$arm_vm_init_c" || { echo "fix-xcode16: TTBR0 keep not applied"; exit 1; }
+#        arm_replace_identity_map() bzero()s the bootstrap V=P L2 table (keeping one code page), which
+#        also erases the framebuffer block, so every df_mark after it faulted. Put the block back into
+#        the rebuilt L2 (fb 0x7c000000 shares the kernel's L1 entry, index 0).
+perl -0pi -e 's#(\t\*tte2 = ARM_TTE_BOOT_TABLE \| \(l3_ptp_phys & ARM_TTE_TABLE_MASK\);\n)#$1\tl2_ptp_virt[L2_TABLE_INDEX(0x7c000000ULL)] = ARM_TTE_BOOT_BLOCK | 0x7c000000ULL; /* fix-xcode16: fire fb for df_mark */\n#' "$arm_vm_init_c"
+grep -q '^	\*tte2 = ARM_TTE_BOOT_TABLE | (l3_ptp_phys & ARM_TTE_TABLE_MASK);$' "$arm_vm_init_c" || { echo "fix-xcode16: tte2 line damaged"; exit 1; }
+grep -q '^	l2_ptp_virt\[L2_TABLE_INDEX(0x7c000000ULL)\] = ARM_TTE_BOOT_BLOCK | 0x7c000000ULL;' "$arm_vm_init_c" || { echo "fix-xcode16: fb block not restored in arm_replace_identity_map"; exit 1; }
 perl -pi -e '
   if (!$d && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ .= "\tdf_mark(9);\n"; $d = 1; }
   elsif (!$e && /^\tPE_init_printf\(FALSE\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }

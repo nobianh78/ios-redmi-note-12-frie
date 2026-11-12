@@ -156,3 +156,31 @@ LEXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
 EOF
 grep -q 'globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)' "$caches" || { echo "fix-xcode16: cache clean stubs missing"; exit 1; }
 echo "fix-xcode16: added CleanPoC_DcacheRegion_Force_nopreempt[_nohid], ml_enable_monitor"
+
+# 11. Boot breadcrumbs for the Redmi 12 ("fire") bring-up. Each DF_MARK paints a black band on the
+#     panel's scanout buffer (physical 0x7c430000, pitch 4352, measured on the phone) so the furthest
+#     stage reached is visible without a UART. MMU-off stages only (physical address). Uses x16/x17 and
+#     cbnz (no flags), unique labels via \@. Drop this step once XNU has a real console.
+start_s="$src/osfmk/arm64/start.s"
+perl -0pi -e 's|(#include <arm64/exception_asm.h>\n)|$1
+/* fix-xcode16: DF_MARK n - black band at rows 1300+60n..+40 of the fire framebuffer (MMU off only) */
+.macro DF_MARK n
+	ldr		x16, =(0x7c430000 + (1300 + (\\n * 60)) * 4352)
+	mov		x17, #((40 * 4352) / 8)
+df_mark_loop\\\@:
+	str		xzr, [x16], #8
+	sub		x17, x17, #1
+	cbnz	x17, df_mark_loop\\\@
+	dsb		sy
+.endmacro
+|' "$start_s"
+perl -pi -e '
+  $in = 1 if /^LEXT\(start_first_cpu\)/;
+  if ($in && !$m0 && /^\s*msr\s+DAIFSet, #\(DAIFSC_ALL\)/) { $_ .= "\tDF_MARK 0\n"; $m0 = 1; }
+  if ($in && !$m1 && /^\s*ldr\s+x26, \[x20, BA_BOOT_FLAGS\]/) { $_ .= "\tDF_MARK 1\n"; $m1 = 1; }
+  if ($in && !$m2 && /^\s*b\s+common_start\s*$/) { $_ = "\tDF_MARK 2\n$_"; $m2 = 1; }
+  if (!$m3 && /^\s*MOV64\s+x0, SCTLR_EL1_DEFAULT/) { $_ = "\tDF_MARK 3\n$_"; $m3 = 1; }
+' "$start_s"
+test "$(grep -c '^	DF_MARK [0-3]$' "$start_s")" -eq 4 || { echo "fix-xcode16: expected 4 DF_MARKs in start.s"; grep -n DF_MARK "$start_s"; exit 1; }
+grep -q '^\.macro DF_MARK n' "$start_s" || { echo "fix-xcode16: DF_MARK macro missing"; exit 1; }
+echo "fix-xcode16: inserted 4 boot breadcrumbs (DF_MARK) in start.s"

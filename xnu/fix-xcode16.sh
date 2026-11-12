@@ -53,6 +53,10 @@ vm_offset_t rorgn_end = 0;
 void rorgn_stash_range(void) {}
 void rorgn_lockdown(void) {}
 bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval) { (void)addr; (void)size; return defval; }
+
+/* Unpublished pmap-cs / I/O-filter hooks (declared in vm/pmap.h): no PPL, no code-signing monitor. */
+int pmap_cs_configuration(void) { return 0; }
+bool pmap_has_iofilter_protected_write(void) { return false; }
 EOF
 cp "$(dirname "$0")/kpc_stub.c" "$src/osfmk/arm64/kpc.c"
 echo "fix-xcode16: stubbed amcc_rorgn_common.c and arm64 kpc.c"
@@ -100,3 +104,21 @@ for s in "$src"/osfmk/arm64/*.s "$src"/osfmk/arm/*.s; do
     close ARGV if eof;' "$s"
 done
 echo "fix-xcode16: neutralized Apple-only system registers in arm/arm64 assembly"
+
+# 8. The ARM64 boot core is gated on PPL: `optional a b` needs every option, and arm_init.c,
+#    arm_vm_init.c and start.s all list config_pmap_ppl. Their PPL parts are #if XNU_MONITOR inside,
+#    so build them on nos_arm_asm alone. Without them _start, gPhysBase, phystokv... are missing.
+files_arm64="$src/osfmk/conf/files.arm64"
+perl -pi -e 's/^(osfmk\/arm\/arm_init\.c\s+)optional config_pmap_ppl\s*$/$1optional nos_arm_asm\n/;
+              s/^(osfmk\/arm64\/arm_vm_init\.c\s+)optional config_pmap_ppl\s*$/$1optional nos_arm_asm\n/;
+              s/^(osfmk\/arm64\/start\.s\s+)optional nos_arm_asm config_pmap_ppl\s*$/$1optional nos_arm_asm\n/' "$files_arm64"
+for f in arm/arm_init.c arm64/arm_vm_init.c arm64/start.s; do
+  grep -qE "^osfmk/$f[[:space:]]+optional nos_arm_asm\$" "$files_arm64" || { echo "fix-xcode16: $f gate not changed"; exit 1; }
+done
+
+#    Apple IOMMU descriptors (DART/SART/UAT/NVMe-PPL) and pmap_iommu_* only live in the export list
+#    for Apple's kexts; nothing in the kernel calls them, and their code is unpublished. Unexport them.
+exports="$src/config/Private.arm64.exports"
+perl -ni -e 'print unless /^_(pmap_iommu_\w+|nvme_ppl_get_desc|sart_get_desc|uat_get_desc|t\d+dart_\w+)\s*$/' "$exports"
+! grep -qE '^_(pmap_iommu_|t[0-9]+dart_|sart_get_desc|uat_get_desc|nvme_ppl_get_desc)' "$exports" || { echo "fix-xcode16: IOMMU exports left"; exit 1; }
+echo "fix-xcode16: built boot core without PPL gate, unexported Apple IOMMU descriptors"

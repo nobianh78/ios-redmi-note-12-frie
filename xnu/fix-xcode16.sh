@@ -56,3 +56,15 @@ bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval) { (void)addr;
 EOF
 cp "$(dirname "$0")/kpc_stub.c" "$src/osfmk/arm64/kpc.c"
 echo "fix-xcode16: stubbed amcc_rorgn_common.c and arm64 kpc.c"
+
+# 5. pmap.c unconditionally includes arm64/ppl/sart.h and uat.h (unpublished) and calls only
+#    sart_bootstrap() / uat_bootstrap(): Apple's SART and GPU UAT IOMMUs. No such hardware on MT6768.
+mkdir -p "$src/osfmk/arm64/ppl"
+for hw in sart uat; do
+  cat > "$src/osfmk/arm64/ppl/$hw.h" <<EOF
+/* Stub: Apple ${hw^^} hardware is absent on non-Apple SoCs (fix-xcode16.sh). */
+#pragma once
+static inline void ${hw}_bootstrap(void) {}
+EOF
+done
+echo "fix-xcode16: stubbed arm64/ppl/sart.h and uat.h"

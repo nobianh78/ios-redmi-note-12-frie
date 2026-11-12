@@ -69,3 +69,16 @@ static inline void ${hw}_bootstrap(void) {}
 EOF
 done
 echo "fix-xcode16: stubbed arm64/ppl/sart.h and uat.h"
+
+# 6. pmap.c's !XNU_MONITOR (no PPL) branch has rotted, since Apple builds this config with PPL:
+#    a. ptep_get_iommu() (unpublished) is only used in panic messages: print the PTE pointer instead.
+#    b. pmap_phys_write_disable() is called before its static definition: add a forward declaration.
+#    c. pmap_ppl_(un)lockdown_pages() are PPL-only page lockdown: without PPL there is nothing to do.
+pmap_c="$src/osfmk/arm/pmap/pmap.c"
+perl -pi -e 's/ptep_get_iommu\(pte_p\)/(void *)(pte_p)/g' "$pmap_c"
+perl -0pi -e 's/(#include <sys\/cdefs\.h>\n)/$1\nstatic void pmap_phys_write_disable(vm_address_t va); \/* fix-xcode16 *\/\n/' "$pmap_c"
+perl -0pi -e 's/#else\n(\s*)pmap_ppl_(un)?lockdown_pages\(kva, size, 0, ppl_writable\);\n/#else\n$1(void)kva; (void)size; (void)ppl_writable; \/* no PPL: no lockdown *\/\n/g' "$pmap_c"
+! grep -q 'ptep_get_iommu' "$pmap_c" || { echo "fix-xcode16: ptep_get_iommu left"; exit 1; }
+grep -q 'static void pmap_phys_write_disable(vm_address_t va); /\* fix-xcode16' "$pmap_c" || { echo "fix-xcode16: forward decl missing"; exit 1; }
+test "$(grep -c 'no PPL: no lockdown' "$pmap_c")" -eq 2 || { echo "fix-xcode16: lockdown stubs not applied"; exit 1; }
+echo "fix-xcode16: patched pmap.c no-PPL branch"

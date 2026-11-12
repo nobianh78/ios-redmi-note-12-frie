@@ -81,7 +81,12 @@ jobs:
               | grep -E '\.(c|cpp|h|s|S|hpp|iig|defs):[0-9]+(:[0-9]+)?: (fatal )?error:' \
               | awk '!seen[$0]++' | head -n 6 | sed 's/^/::error::/'
             # linker diagnostics other than undefined symbols (duplicates, bad relocations, ...)
-            echo "::error::ld: $(sed -e 's/\x1b\[[0-9;]*m//g' build.log | grep -E '^ld: |duplicate symbol|^\s+in .*\.o$|error: ' | grep -v 'symbol(s) not found' | awk '!seen[$0]++' | head -n 12 | tr '\n' '|' | cut -c1-2500)"
+            # the lines just before the first failing make target hold the real ld/compiler message
+            clean=$(mktemp); sed -e 's/\x1b\[[0-9;]*m//g' build.log > "$clean"
+            n=$(grep -n -m1 -E 'make\[[0-9]+\]: \*\*\* ' "$clean" | cut -d: -f1)
+            if [ -n "$n" ]; then
+              echo "::error::before failure: $(head -n "$n" "$clean" | tail -n 40 | grep -viE 'warning|patch|^\s*$' | tail -n 15 | tr '\n' '|' | cut -c1-3000)"
+            fi
             echo "::error::first make failure: $(sed -e 's/\x1b\[[0-9;]*m//g' build.log | grep -m1 -E 'make\[[0-9]+\]: \*\*\* ' | cut -c1-600)"
             echo "::error::log tail: $(sed -e 's/\x1b\[[0-9;]*m//g' build.log | grep -v '^\s*$' | tail -n 8 | tr '\n' '|' | cut -c1-3000)"
             exit 1

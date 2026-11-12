@@ -269,11 +269,13 @@ perl -pi -e '
 ' "$arm_vm_init_c"
 test "$(grep -c 'df_mark(1[3-8]);' "$arm_vm_init_c")" -eq 6 || { echo "fix-xcode16: expected df_mark 13-18 in arm_vm_init.c"; grep -n df_mark "$arm_vm_init_c"; exit 1; }
 echo "fix-xcode16: df_mark 13-18 inside arm_vm_init"
+#        16 bands on fire: all of arm_vm_init (13-18) and mark 9 after it, then nothing. Marks 10-12
+#        sit inside the arm_vm_init -> PE_init_printf stretch (screen has room for 19 bands only).
 perl -pi -e '
   if (!$d && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ .= "\tdf_mark(9);\n"; $d = 1; }
-  elsif (!$e && /^\tPE_init_printf\(FALSE\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }
-  elsif (!$f && /^\tPE_init_platform\(TRUE, &BootCpuData\);/) { $_ .= "\tdf_mark(11);\n"; $f = 1; }
-  elsif (!$g && /^\tmachine_startup\(args\);/) { $_ = "\tdf_mark(12);\n$_"; $g = 1; }
+  elsif (!$e && /^\tPE_consistent_debug_inherit\(\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }
+  elsif (!$f && /^\tconst unsigned int serial_exists = serial_init\(\);/) { $_ .= "\tdf_mark(11);\n"; $f = 1; }
+  elsif (!$g && /^\tkernel_startup_initialize_upto\(STARTUP_SUB_KPRINTF\);/) { $_ .= "\tdf_mark(12);\n"; $g = 1; }
 ' "$arm_init"
 test "$(grep -c 'df_mark(\(9\|1[0-2]\));' "$arm_init")" -eq 4 || { echo "fix-xcode16: expected df_mark 9-12 in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

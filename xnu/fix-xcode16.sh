@@ -82,3 +82,21 @@ perl -0pi -e 's/#else\n(\s*)pmap_ppl_(un)?lockdown_pages\(kva, size, 0, ppl_writ
 grep -q 'static void pmap_phys_write_disable(vm_address_t va); /\* fix-xcode16' "$pmap_c" || { echo "fix-xcode16: forward decl missing"; exit 1; }
 test "$(grep -c 'no PPL: no lockdown' "$pmap_c")" -eq 2 || { echo "fix-xcode16: lockdown stubs not applied"; exit 1; }
 echo "fix-xcode16: patched pmap.c no-PPL branch"
+
+# 7. Assembly touches Apple-only system registers by name (CPU_OVRD, CPU_CFG, ...). VMAPPLE has no
+#    header defining them, and Cortex cores do not implement them. Architectural registers are named
+#    *_EL0..3 or are one of a few PSTATE/special names; anything else is Apple's: reads give 0,
+#    writes are dropped (same rule as for implementation-defined registers elsewhere in this port).
+for s in "$src"/osfmk/arm64/*.s "$src"/osfmk/arm/*.s; do
+  [ -f "$s" ] || continue
+  perl -pi -e '
+    BEGIN { %arch = map { $_ => 1 } qw(DAIF DAIFSet DAIFClr NZCV FPCR FPSR SPSel CurrentEL PAN UAO DIT SSBS TCO) }
+    sub apple { my $r = shift; $r =~ /^[A-Z][A-Z0-9_]*$/ && $r !~ /_EL[0-3]$/ && !$arch{$r} }
+    if (/^(\s*)mrs\s+(x\d+|w\d+)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\/\/.*)?$/ && apple($3)) {
+      $_ = "$1mov\t$2, #0\t// fix-xcode16: Apple-only $3\n"; print STDERR "  $ARGV:$.: mrs $3\n";
+    } elsif (/^(\s*)msr\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*(x\d+|w\d+|#\S+)\s*(\/\/.*)?$/ && apple($2)) {
+      $_ = "$1nop\t\t// fix-xcode16: Apple-only $2\n"; print STDERR "  $ARGV:$.: msr $2\n";
+    }
+    close ARGV if eof;' "$s"
+done
+echo "fix-xcode16: neutralized Apple-only system registers in arm/arm64 assembly"

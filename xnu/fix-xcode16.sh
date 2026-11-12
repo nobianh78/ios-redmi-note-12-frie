@@ -233,7 +233,50 @@ df_mark(int n)
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
+
+#include "df_font8x8.h"
+/* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
+void df_puts(const char *s, unsigned long caller);
+void
+df_puts(const char *s, unsigned long caller)
+{
+	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+	const unsigned pitch = 4320 / 4, top = 2080, bottom = 2460, cols = 1080 / 16;
+	char hex[26] = "caller 0x";
+	for (int i = 0; i < 16; i++) {
+		hex[9 + i] = "0123456789abcdef"[(caller >> (60 - 4 * i)) & 0xf];
+	}
+	hex[25] = 0;
+	for (unsigned y = top; y < bottom; y++) {
+		for (unsigned x = 0; x < 1080; x++) {
+			fb[y * pitch + x] = 0xff000000;
+		}
+	}
+	unsigned col = 0, row = 0;
+	for (int pass = 0; pass < 2; pass++) {
+		for (const char *c = pass ? hex : s; *c && top + (row + 1) * 18 < bottom; c++) {
+			if (*c == '\n' || col == cols) { col = 0; row++; if (*c == '\n') continue; }
+			unsigned ch = (*c < 0x20 || *c > 0x7e) ? '?' : (unsigned)*c;
+			for (int fy = 0; fy < 16; fy++) {
+				uint8_t bits = font8x8[ch - 0x20][fy / 2];
+				for (int fx = 0; fx < 16; fx++) {
+					if (bits & (1 << (fx / 2))) {
+						fb[(top + row * 18 + fy) * pitch + col * 16 + fx] = 0xffffffff;
+					}
+				}
+			}
+			col++;
+		}
+		col = 0; row++;
+	}
+	for (uintptr_t a = (uintptr_t)&fb[top * pitch]; a < (uintptr_t)&fb[bottom * pitch]; a += 64) {
+		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
 EOF
+cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
 arm_init="$src/osfmk/arm/arm_init.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$arm_init"
 perl -pi -e '
@@ -285,6 +328,7 @@ avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
-perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n|' "$dbg_c"
+#        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
+perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ char df_b[512] = "PANIC: "; if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"
 grep -q 'df_mark(13);' "$dbg_c" || { echo "fix-xcode16: expected df_mark 13 in debug.c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

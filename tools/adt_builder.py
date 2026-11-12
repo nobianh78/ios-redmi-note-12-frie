@@ -64,6 +64,7 @@ def build_fire_adt() -> bytes:
       - pe_identify_machine(): /cpus children with "state" == "running" give timebase/clock freq.
       - ml_parse_cpu_topology(): every /cpus child needs "reg" (panics otherwise); the boot CPU is
         the one whose "state" is "running".
+      - early_random() (first call in arm_vm_init): /chosen "random-seed", 64 bytes.
     Interrupt controller / timer nodes are deliberately absent until XNU gets that far.
     """
     root = ADTNode("device-tree")
@@ -76,6 +77,9 @@ def build_fire_adt() -> bytes:
     chosen = ADTNode("chosen")
     chosen.add_property("firmware-version", cstr("DarwinFire heartbeat loader"))
     chosen.add_property("debug-enabled", u32(1))
+    # early_random() -> bootseed_init_bootloader() panics unless PE_get_random_seed() returns
+    # 64 bytes from /chosen "random-seed" (xnu-8796 osfmk/prng/prng_random.c). Fresh per build.
+    chosen.add_property("random-seed", os.urandom(64))
     root.add_child(chosen)
 
     cpus = ADTNode("cpus")

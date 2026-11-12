@@ -257,6 +257,18 @@ grep -q 'fire bring-up keeps the bootstrap V=P tables' "$arm_vm_init_c" || { ech
 perl -0pi -e 's#(\t\*tte2 = ARM_TTE_BOOT_TABLE \| \(l3_ptp_phys & ARM_TTE_TABLE_MASK\);\n)#$1\tl2_ptp_virt[L2_TABLE_INDEX(0x7c000000ULL)] = ARM_TTE_BOOT_BLOCK | 0x7c000000ULL; /* fix-xcode16: fire fb for df_mark */\n#' "$arm_vm_init_c"
 grep -q '^	\*tte2 = ARM_TTE_BOOT_TABLE | (l3_ptp_phys & ARM_TTE_TABLE_MASK);$' "$arm_vm_init_c" || { echo "fix-xcode16: tte2 line damaged"; exit 1; }
 grep -q '^	l2_ptp_virt\[L2_TABLE_INDEX(0x7c000000ULL)\] = ARM_TTE_BOOT_BLOCK | 0x7c000000ULL;' "$arm_vm_init_c" || { echo "fix-xcode16: fb block not restored in arm_replace_identity_map"; exit 1; }
+#        Still 9 bands with the fb block restored: breadcrumbs 13-18 inside arm_vm_init itself.
+perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$arm_vm_init_c"
+perl -pi -e '
+  if (!$h && /^\tavail_start = args->topOfKernelData;/) { $_ .= "\tdf_mark(13);\n"; $h = 1; }
+  elsif (!$i && m{^\t/\* Initialize invalid tte page \*/}) { $_ = "\tdf_mark(14);\n$_"; $i = 1; }
+  elsif (!$j && /^\tarm_vm_prot_init\(args\);/) { $_ = "\tdf_mark(15);\n$_"; $j = 1; }
+  elsif (!$k && /^\tarm_vm_physmap_init\(args\);/) { $_ = "\tdf_mark(16);\n$_"; $k = 1; }
+  elsif (!$l && /^\tset_mmu_ttb_alternate\(cpu_ttep & TTBR_BADDR_MASK\);/) { $_ .= "\tdf_mark(17);\n"; $l = 1; }
+  elsif (!$m && /^\tkva_active = TRUE;/) { $_ .= "\tdf_mark(18);\n"; $m = 1; }
+' "$arm_vm_init_c"
+test "$(grep -c 'df_mark(1[3-8]);' "$arm_vm_init_c")" -eq 6 || { echo "fix-xcode16: expected df_mark 13-18 in arm_vm_init.c"; grep -n df_mark "$arm_vm_init_c"; exit 1; }
+echo "fix-xcode16: df_mark 13-18 inside arm_vm_init"
 perl -pi -e '
   if (!$d && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ .= "\tdf_mark(9);\n"; $d = 1; }
   elsif (!$e && /^\tPE_init_printf\(FALSE\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }

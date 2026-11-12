@@ -273,9 +273,9 @@ test "$(grep -c 'df_mark(\(9\|10\));' "$arm_init")" -eq 2 || { echo "fix-xcode16
 vc_c="$(dirname "$arm_init")/../console/video_console.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
 perl -pi -e '
-  if (!$a && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(11);\n"; $a = 1; }
-  elsif (!$b && /^\t\t\tgc_initialize\(&vinfo\);/) { $_ .= "\t\t\tdf_mark(12);\n"; $b = 1; }
-  elsif (!$c && /^\tgraphics_now = gc_graphics_boot && !gc_desire_text;/) { $_ = "\tdf_mark(13);\n$_"; $c = 1; }
+  if (!$a && /^\s+new_vinfo\.v_physaddr, new_vinfo\.v_width.*BRINGUP/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
+  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n"; $b = 1; }
+  elsif (!$c && /^\t\t\tgc_initialize\(&vinfo\);/) { $_ .= "\t\t\tdf_mark(13);\n"; $c = 1; }
 ' "$vc_c"
 test "$(grep -c 'df_mark(1[1-3]);' "$vc_c")" -eq 3 || { echo "fix-xcode16: expected df_mark 11-13 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

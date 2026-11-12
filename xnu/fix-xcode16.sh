@@ -164,12 +164,14 @@ echo "fix-xcode16: added CleanPoC_DcacheRegion_Force_nopreempt[_nohid], ml_enabl
 #     cbnz (no flags), unique labels via \@. Drop this step once XNU has a real console.
 start_s="$src/osfmk/arm64/start.s"
 perl -0pi -e 's|(#include <arm64/exception_asm.h>\n)|$1
-/* fix-xcode16: DF_MARK n - black band at rows 1300+60n..+40 of fire OVL layer 3 (MMU off only) */
+/* fix-xcode16: DF_MARK n - bright band at rows 1300+60n..+40 of fire OVL layer 3 (MMU off only).
+ * Pixel value = low 32 bits of its own address (0x7ce6xxxx -> pink/red), visible on the dark blue
+ * console background; black was too close to it to read in photos. */
 .macro DF_MARK n
 	ldr		x16, =(0x7ce6a000 + (1300 + (\\n * 60)) * 4320)
-	mov		x17, #((40 * 4320) / 8)
+	mov		x17, #((40 * 4320) / 4)
 df_mark_loop\\\@:
-	str		xzr, [x16], #8
+	str		w16, [x16], #4
 	sub		x17, x17, #1
 	cbnz	x17, df_mark_loop\\\@
 	dsb		sy

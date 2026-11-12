@@ -171,7 +171,8 @@ perl -0pi -e 's|(#include <arm64/exception_asm.h>\n)|$1
 	ldr		x16, =(0x7ce6a000 + (1300 + (\\n * 60)) * 4320)
 	mov		x17, #((40 * 4320) / 4)
 df_mark_loop\\\@:
-	str		w16, [x16], #4
+	str		w16, [x16]		/* no writeback form: base==source is UNPREDICTABLE */
+	add		x16, x16, #4
 	sub		x17, x17, #1
 	cbnz	x17, df_mark_loop\\\@
 	dsb		sy

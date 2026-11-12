@@ -122,3 +122,13 @@ exports="$src/config/Private.arm64.exports"
 perl -ni -e 'print unless /^_(pmap_iommu_\w+|nvme_ppl_get_desc|sart_get_desc|uat_get_desc|t\d+dart_\w+)\s*$/' "$exports"
 ! grep -qE '^_(pmap_iommu_|t[0-9]+dart_|sart_get_desc|uat_get_desc|nvme_ppl_get_desc)' "$exports" || { echo "fix-xcode16: IOMMU exports left"; exit 1; }
 echo "fix-xcode16: built boot core without PPL gate, unexported Apple IOMMU descriptors"
+
+# 9. start.s includes arm64/tunables/tunables.s (unpublished) for one macro, APPLY_TUNABLES, which
+#    writes per-Apple-SoC HID settings chosen by MIDR. Cortex cores need none: empty macro.
+mkdir -p "$src/osfmk/arm64/tunables"
+cat > "$src/osfmk/arm64/tunables/tunables.s" <<'EOF'
+/* Stub (fix-xcode16.sh): no Apple per-SoC HID tunables on non-Apple cores. */
+.macro APPLY_TUNABLES midr, tmp1, tmp2
+.endmacro
+EOF
+echo "fix-xcode16: stubbed arm64/tunables/tunables.s"

@@ -275,7 +275,11 @@ perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadc
 perl -pi -e '
   if (!$a && /^\s+new_vinfo\.v_physaddr, new_vinfo\.v_width.*BRINGUP/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
   elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n"; $b = 1; }
-  elsif (!$c && /^\t\t\tgc_initialize\(&vinfo\);/) { $_ .= "\t\t\tdf_mark(13);\n"; $c = 1; }
 ' "$vc_c"
-test "$(grep -c 'df_mark(1[1-3]);' "$vc_c")" -eq 3 || { echo "fix-xcode16: expected df_mark 11-13 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }
+test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expected df_mark 11-12 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }
+#        11 bands: hang inside ml_io_map_unmappable. Mark 13 = any panic (panic_trap_to_debugger entry),
+#        to tell a silent panic from a real hang.
+dbg_c="$(dirname "$arm_init")/../kern/debug.c"
+perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n|' "$dbg_c"
+grep -q 'df_mark(13);' "$dbg_c" || { echo "fix-xcode16: expected df_mark 13 in debug.c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

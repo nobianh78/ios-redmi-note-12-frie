@@ -61,8 +61,9 @@ echo "fix-xcode16: stubbed amcc_rorgn_common.c and arm64 kpc.c"
 #    sart_bootstrap() / uat_bootstrap(): Apple's SART and GPU UAT IOMMUs. No such hardware on MT6768.
 mkdir -p "$src/osfmk/arm64/ppl"
 for hw in sart uat; do
+  HW=$(echo "$hw" | tr a-z A-Z)   # not ${hw^^}: macOS /bin/bash is 3.2
   cat > "$src/osfmk/arm64/ppl/$hw.h" <<EOF
-/* Stub: Apple ${hw^^} hardware is absent on non-Apple SoCs (fix-xcode16.sh). */
+/* Stub: Apple $HW hardware is absent on non-Apple SoCs (fix-xcode16.sh). */
 #pragma once
 static inline void ${hw}_bootstrap(void) {}
 EOF

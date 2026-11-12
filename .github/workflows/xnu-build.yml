@@ -74,7 +74,8 @@ jobs:
           set -o pipefail
           report() {
             set +e   # the runner uses bash -e; a grep with no match must not abort the report
-            syms=$(grep -o '"_[A-Za-z0-9_]*", referenced' build.log | cut -d'"' -f2 | sort -u | tr '\n' ' ')
+            # C and demangled C++ names ("Class::method(...)", "vtable for Class")
+            syms=$(grep -oE '^\s*"[^"]+", referenced' build.log | cut -d'"' -f2 | sort -u | tr '\n' ';' | cut -c1-3500)
             [ -n "$syms" ] && echo "::error::undefined symbols: $syms"
             # compiler/assembler errors with a file location; skip build.sh's harmless patch-apply noise
             sed -e 's/\x1b\[[0-9;]*m//g' build.log \

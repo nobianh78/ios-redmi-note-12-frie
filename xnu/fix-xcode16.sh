@@ -124,6 +124,9 @@ done
 exports="$src/config/Private.arm64.exports"
 perl -ni -e 'print unless /^_(pmap_iommu_\w+|nvme_ppl_get_desc|sart_get_desc|uat_get_desc|t\d+dart_\w+)\s*$/' "$exports"
 ! grep -qE '^_(pmap_iommu_|t[0-9]+dart_|sart_get_desc|uat_get_desc|nvme_ppl_get_desc)' "$exports" || { echo "fix-xcode16: IOMMU exports left"; exit 1; }
+#    Same for the C++ IOUnifiedAddressTranslator (IOKit side of Apple's GPU UAT): exported, no source.
+perl -ni -e 'print unless /IOUnifiedAddressTranslator/' "$exports"
+! grep -q 'IOUnifiedAddressTranslator' "$exports" || { echo "fix-xcode16: IOUnifiedAddressTranslator exports left"; exit 1; }
 echo "fix-xcode16: built boot core without PPL gate, unexported Apple IOMMU descriptors"
 
 # 9. start.s includes arm64/tunables/tunables.s (unpublished) for one macro, APPLY_TUNABLES, which

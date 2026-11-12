@@ -241,6 +241,18 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     g_phys_base = phys_base; g_virt_base = p->virt_base; g_kernel_size = p->kernel_size;
     uint64_t entry = phys_base + p->entry_offset;
 
+    /* Self-built XNU drew no breadcrumb band: check what is really in RAM at the entry point (LK may
+     * truncate a large decompressed kernel) and that the first instruction XNU runs is allowed here. */
+    fbcon_puts("entry word: "); fbcon_hex(*(volatile uint32_t *)(phys_base + p->entry_offset));
+    /* shortcut: offset 0xb31a64 is the last non-zero word of this particular build (expect 0x6f72); drop after the check */
+    if (p->kernel_size > 0xb31a68) {
+        fbcon_puts("\nword@b31a64: "); fbcon_hex(*(volatile uint32_t *)(phys_base + 0xb31a64));
+    }
+    fbcon_puts("\nOSLAR test... ");
+    __asm__ volatile("dsb sy" ::: "memory");
+    __asm__ volatile("msr oslar_el1, xzr; isb");
+    fbcon_puts("ok\n");
+
     uint64_t sctlr;
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
     fbcon_puts("XNU physBase: "); fbcon_hex(phys_base);
@@ -284,10 +296,14 @@ void heartbeat_main(uint64_t fdt_addr) {
     print_layers("OVL0_2L", en2, ovl2l);
     fbcon_puts("\nsurfaces: "); fbcon_dec(fbcon_count()); fbcon_puts("\n\n");
 
-    /* Video for XNU: the buffer OVL0 layer 0 scans out (measured: 0x7c430000, pitch 4352). */
+    /* Video for XNU: the TOPMOST enabled OVL layer. Higher layers cover lower ones; on fire layer 3
+     * (0x7ce6a000, pitch 4320) hides layer 0, so writes to layer 0 never reach the panel. */
     struct fb_surface video = { 0 };
-    if (ovl0[0].ok) video = (struct fb_surface){ ovl0[0].addr, ovl0[0].pitch, ovl0[0].w, ovl0[0].h, 4 };
-    else if (have_fb) video = (struct fb_surface){ fb, 1080 * 4, 1080, 2460, 4 };
+    for (int i = 3; i >= 0 && !video.base; i--) {
+        if (ovl0[i].ok) video = (struct fb_surface){ ovl0[i].addr, ovl0[i].pitch, ovl0[i].w, ovl0[i].h, 4 };
+    }
+    if (!video.base && have_fb) video = (struct fb_surface){ fb, 1080 * 4, 1080, 2460, 4 };
+    fbcon_puts("video: "); fbcon_hex(video.base); fbcon_puts(" p="); fbcon_dec(video.pitch); fbcon_putc('\n');
 
     /* XNU payload: appended after this image inside the gzip'd kernel (LK rejects a 49 MB ramdisk),
      * else in the ramdisk. boot_xnu returns only if there is no valid payload. */

@@ -30,9 +30,23 @@ xnu_jump:
     mov  x1, xzr
     mov  x2, xzr
     mov  x3, xzr
+    // Proof we reached the branch: grey band at rows 1200..1240 (XNU's DF_MARK bands start at row 1300).
+    // Must target OVL layer 3 (0x7ce6a000, pitch 4320): it sits on top of layer 0 and hides it.
+    ldr  x9, =(0x7ce6a000 + 1200 * 4320)
+    mov  x10, #((40 * 4320) / 4)
+    ldr  w11, =0xff808080
+1:  str  w11, [x9], #4
+    sub  x10, x10, #1
+    cbnz x10, 1b
+    // LK ran with caches on: drop any stale instruction-cache lines / TLB entries before running
+    // freshly decompressed code.
+    dsb  sy
+    ic   iallu
+    tlbi vmalle1
     dsb  sy
     isb
     br   x16
+    .ltorg
 
 // Exception vectors: any fault before XNU installs its own VBAR lands here and is printed on screen.
 // Each slot reloads our own stack (the faulting context's SP is not trusted) and reports.

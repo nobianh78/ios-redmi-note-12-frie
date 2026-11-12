@@ -158,15 +158,16 @@ grep -q 'globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)' "$caches" || { 
 echo "fix-xcode16: added CleanPoC_DcacheRegion_Force_nopreempt[_nohid], ml_enable_monitor"
 
 # 11. Boot breadcrumbs for the Redmi 12 ("fire") bring-up. Each DF_MARK paints a black band on the
-#     panel's scanout buffer (physical 0x7c430000, pitch 4352, measured on the phone) so the furthest
+#     visible scanout buffer: OVL layer 3 (physical 0x7ce6a000, pitch 4320), which sits on top of
+#     layer 0 (0x7c430000) and hides it, as measured on the phone. So the furthest
 #     stage reached is visible without a UART. MMU-off stages only (physical address). Uses x16/x17 and
 #     cbnz (no flags), unique labels via \@. Drop this step once XNU has a real console.
 start_s="$src/osfmk/arm64/start.s"
 perl -0pi -e 's|(#include <arm64/exception_asm.h>\n)|$1
-/* fix-xcode16: DF_MARK n - black band at rows 1300+60n..+40 of the fire framebuffer (MMU off only) */
+/* fix-xcode16: DF_MARK n - black band at rows 1300+60n..+40 of fire OVL layer 3 (MMU off only) */
 .macro DF_MARK n
-	ldr		x16, =(0x7c430000 + (1300 + (\\n * 60)) * 4352)
-	mov		x17, #((40 * 4352) / 8)
+	ldr		x16, =(0x7ce6a000 + (1300 + (\\n * 60)) * 4320)
+	mov		x17, #((40 * 4320) / 8)
 df_mark_loop\\\@:
 	str		xzr, [x16], #8
 	sub		x17, x17, #1

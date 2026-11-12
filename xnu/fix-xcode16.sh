@@ -57,6 +57,9 @@ bool rorgn_contains(vm_offset_t addr, vm_size_t size, bool defval) { (void)addr;
 /* Unpublished pmap-cs / I/O-filter hooks (declared in vm/pmap.h): no PPL, no code-signing monitor. */
 int pmap_cs_configuration(void) { return 0; }
 bool pmap_has_iofilter_protected_write(void) { return false; }
+
+/* PPL monitor entry (arm_vm_init.c calls it unconditionally): nothing to enable without PPL. */
+void ml_enable_monitor(void) {}
 EOF
 cp "$(dirname "$0")/kpc_stub.c" "$src/osfmk/arm64/kpc.c"
 echo "fix-xcode16: stubbed amcc_rorgn_common.c and arm64 kpc.c"
@@ -132,3 +135,21 @@ cat > "$src/osfmk/arm64/tunables/tunables.s" <<'EOF'
 .endmacro
 EOF
 echo "fix-xcode16: stubbed arm64/tunables/tunables.s"
+
+# 10. With APPLE_ARM64_ARCH_FAMILY (set for VMAPPLE) CleanPoC_DcacheRegion_Force calls the unpublished
+#     CleanPoC_DcacheRegion_Force_nopreempt[_nohid]. Cortex caches really must be cleaned, so route both
+#     to the file-local cvac/civac loop CleanPoC_DcacheRegion_internal (not global, hence defined here).
+caches="$src/osfmk/arm64/caches_asm.s"
+cat >> "$caches" <<'EOF'
+
+/* fix-xcode16: unpublished nopreempt variants -> real cache clean loop (callers already block preemption) */
+	.text
+	.align 2
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt)
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+	b		EXT(CleanPoC_DcacheRegion_internal)
+EOF
+grep -q 'globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)' "$caches" || { echo "fix-xcode16: cache clean stubs missing"; exit 1; }
+echo "fix-xcode16: added CleanPoC_DcacheRegion_Force_nopreempt[_nohid], ml_enable_monitor"

@@ -47,68 +47,59 @@ class ADTNode:
 
         return bytes(out)
 
+def u32(v): return struct.pack("<I", v)
+def u64(*vs): return b"".join(struct.pack("<Q", v) for v in vs)
+def cstr(s): return s.encode("ascii") + b"\x00"
+
+
 def build_fire_adt() -> bytes:
     """
-    Constructs the Apple Device Tree specifically tailored for
-    Xiaomi Redmi 12 ("fire" / MediaTek Helio G88 MT6769H)
-    """
-    root = ADTNode()
-    root.add_property("name", b"device-tree\x00")
-    root.add_property("model", b"Xiaomi Redmi 12 (fire)\x00")
-    root.add_property("compatible", b"MT6769H\x00arm64\x00")
-    root.add_property("#address-cells", struct.pack("<I", 2))
-    root.add_property("#size-cells", struct.pack("<I", 2))
+    Minimal Apple Device Tree for the open-source XNU (xnu-8796, VMAPPLE config) on the
+    Redmi 12 "fire" (MT6768, boot CPU Cortex-A55 r1p0, MPIDR 0x81000000, 13 MHz arch timer).
+    All integers are little-endian, as XNU reads them in place.
 
-    # 1. /chosen node
+    Only what XNU dereferences early is here (verified in the xnu-8796 sources):
+      - pe_arm_get_soc_base_phys(): /arm-io "device_type" and "ranges" are read WITHOUT error
+        checks, then *(ranges + 1) is used as the SoC base -> both are mandatory.
+      - pe_identify_machine(): /cpus children with "state" == "running" give timebase/clock freq.
+      - ml_parse_cpu_topology(): every /cpus child needs "reg" (panics otherwise); the boot CPU is
+        the one whose "state" is "running".
+    Interrupt controller / timer nodes are deliberately absent until XNU gets that far.
+    """
+    root = ADTNode("device-tree")
+    root.add_property("model", cstr("Redmi 12 (fire)"))
+    root.add_property("compatible", cstr("fire") + cstr("arm64"))
+    root.add_property("target-type", cstr("fire"))
+    root.add_property("#address-cells", u32(2))
+    root.add_property("#size-cells", u32(2))
+
     chosen = ADTNode("chosen")
-    boot_args_str = b"debug=0x14e serial=2 amfi_get_out_of_my_way=1 cs_enforcement_disable=1\x00"
-    chosen.add_property("boot-args", boot_args_str)
-    chosen.add_property("firmware-version", b"DarwinFire-v0.1-fire\x00")
-    chosen.add_property("random-seed", os.urandom(32))
-    
-    # Machine timeouts required by XNU
-    chosen.add_property("machine-timeouts", struct.pack("<I", 0))
+    chosen.add_property("firmware-version", cstr("DarwinFire heartbeat loader"))
+    chosen.add_property("debug-enabled", u32(1))
     root.add_child(chosen)
 
-    # 2. /memory node (MediaTek 4GB DRAM at 0x40000000)
-    memory = ADTNode("memory")
-    # reg: physical_base (0x40000000), size (0x100000000 = 4GB)
-    reg_val = struct.pack(">QQ", 0x40000000, 0x100000000)
-    memory.add_property("reg", reg_val)
-    memory.add_property("device_type", b"memory\x00")
-    root.add_child(memory)
-
-    # 3. /cpus node (DynamIQ: 2x Cortex-A75 + 6x Cortex-A55)
     cpus = ADTNode("cpus")
-    cpus.add_property("#address-cells", struct.pack("<I", 1))
-    cpus.add_property("#size-cells", struct.pack("<I", 0))
-    
-    # Core 0 (Boot CPU)
-    cpu0 = ADTNode("cpu@0")
-    cpu0.add_property("device_type", b"cpu\x00")
-    cpu0.add_property("reg", struct.pack("<I", 0))
-    cpu0.add_property("compatible", b"arm,cortex-a75\x00")
-    cpu0.add_property("clock-frequency", struct.pack("<I", 2000000000)) # 2.0 GHz
+    cpus.add_property("#address-cells", u32(1))
+    cpus.add_property("#size-cells", u32(0))
+    cpu0 = ADTNode("cpu0")
+    cpu0.add_property("device_type", cstr("cpu"))
+    cpu0.add_property("compatible", cstr("arm,cortex-a55"))
+    cpu0.add_property("reg", u32(0))                      # MPIDR affinity of the boot CPU
+    cpu0.add_property("cpu-id", u32(0))
+    cpu0.add_property("state", cstr("running"))
+    cpu0.add_property("timebase-frequency", u32(13_000_000))  # CNTFRQ_EL0 measured on the phone
+    cpu0.add_property("clock-frequency", u32(2_000_000_000))
     cpus.add_child(cpu0)
     root.add_child(cpus)
 
-    # 4. /arm-io node (MediaTek MT6769 MMIO Devices)
+    # MT6768 peripherals live at 0x10000000..0x1fffffff (TOPRGU 0x10007000, UART 0x11002000,
+    # DISP 0x14000000). ranges = <child-base parent-base size>, 64-bit each.
     arm_io = ADTNode("arm-io")
-    arm_io.add_property("compatible", b"arm-io\x00")
-
-    # MTK High-Speed UART (Serial Console)
-    uart = ADTNode("uart0")
-    uart.add_property("compatible", b"mediatek,mt6769-uart\x00")
-    uart.add_property("reg", struct.pack(">QQ", 0x11002000, 0x1000))
-    uart.add_property("interrupts", struct.pack("<I", 91))
-    arm_io.add_child(uart)
-
-    # ARM GICv2 (Generic Interrupt Controller)
-    gic = ADTNode("aic") # Hooked as AIC so XNU recognizes it
-    gic.add_property("compatible", b"arm,gic-400\x00")
-    gic.add_property("reg", struct.pack(">QQQQ", 0x0C000000, 0x1000, 0x0C002000, 0x2000))
-    arm_io.add_child(gic)
-
+    arm_io.add_property("device_type", cstr("fire-io"))
+    arm_io.add_property("compatible", cstr("fire-io"))
+    arm_io.add_property("ranges", u64(0x0, 0x10000000, 0x10000000))
+    arm_io.add_property("#address-cells", u32(2))
+    arm_io.add_property("#size-cells", u32(2))
     root.add_child(arm_io)
 
     return root.serialize()

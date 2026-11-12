@@ -273,7 +273,7 @@ test "$(grep -c 'df_mark(\(9\|10\));' "$arm_init")" -eq 2 || { echo "fix-xcode16
 vc_c="$(dirname "$arm_init")/../console/video_console.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
 perl -pi -e '
-  if (!$a && /^\t\t\tnewVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
+  if (!$a && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(11);\n"; $a = 1; }
   elsif (!$b && /^\t\t\tgc_initialize\(&vinfo\);/) { $_ .= "\t\t\tdf_mark(12);\n"; $b = 1; }
   elsif (!$c && /^\tgraphics_now = gc_graphics_boot && !gc_desire_text;/) { $_ = "\tdf_mark(13);\n$_"; $c = 1; }
 ' "$vc_c"

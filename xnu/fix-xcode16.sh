@@ -188,3 +188,56 @@ perl -pi -e '
 test "$(grep -c '^	DF_MARK [0-3]$' "$start_s")" -eq 4 || { echo "fix-xcode16: expected 4 DF_MARKs in start.s"; grep -n DF_MARK "$start_s"; exit 1; }
 grep -q '^\.macro DF_MARK n' "$start_s" || { echo "fix-xcode16: DF_MARK macro missing"; exit 1; }
 echo "fix-xcode16: inserted 4 boot breadcrumbs (DF_MARK) in start.s"
+
+# 12. Post-MMU breadcrumbs (fire showed all 4 MMU-off bands, then nothing).
+#     a. After the V=P bootstrap mapping is built, x2 points at its (single, 16K granule: one L1 entry
+#        covers 64 GB) L2 table. Add one 32 MB block V=P mapping 0x7c000000, which holds OVL layers
+#        0 and 3. Calling create_bootstrap_mapping again would allocate a new L2 and replace the L1
+#        entry, dropping the kernel's own mapping. Scratch: x16, x17, x6 (x6 is dead here).
+#     b. DF_MARK_C: same band as DF_MARK, then clean it to PoC (caches are on after SCTLR.M/C).
+perl -0pi -e 's|(\tcreate_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13\n)|$1\t/* fix-xcode16: V=P 32MB block for the fire framebuffer (post-MMU DF_MARK) */\n\tMOV64\tx16, 0x7c000000\n\tand\t\tx17, x16, #(ARM_TT_L2_INDEX_MASK)\n\tlsr\t\tx17, x17, #(ARM_TT_L2_SHIFT)\n\tlsl\t\tx17, x17, #(TTE_SHIFT)\n\tadd\t\tx17, x2, x17\n\tmov\t\tx6, #(ARM_TTE_BOOT_BLOCK)\n\torr\t\tx6, x6, x16\n\tstr\t\tx6, [x17]\n|' "$start_s"
+grep -q 'V=P 32MB block for the fire framebuffer' "$start_s" || { echo "fix-xcode16: fb V=P block not inserted"; exit 1; }
+perl -0pi -e 's|(\.macro DF_MARK n\n.*?\.endmacro\n)|$1
+/* fix-xcode16: DF_MARK_C n - DF_MARK for MMU-on code (V=P fb block): clean the band to PoC */
+.macro DF_MARK_C n
+	DF_MARK \\n
+	ldr		x16, =(0x7ce6a000 + (1300 + (\\n * 60)) * 4320)
+	mov		x17, #((40 * 4320) / 64)
+df_markc_loop\\\@:
+	dc		civac, x16
+	add		x16, x16, #64
+	sub		x17, x17, #1
+	cbnz	x17, df_markc_loop\\\@
+	dsb		sy
+.endmacro
+|s' "$start_s"
+perl -0pi -e 's|(\tMSR_SCTLR_EL1_X0\n\tisb\t\tsy\n)|$1\tDF_MARK_C 4\n|' "$start_s"
+grep -q '^	DF_MARK_C 4$' "$start_s" || { echo "fix-xcode16: DF_MARK_C 4 not inserted"; grep -n -A2 'MSR_SCTLR_EL1_X0' "$start_s"; exit 1; }
+
+#     c. C breadcrumbs in arm_init() (TTBR0 still holds the V=P tables until arm_vm_init()).
+cat >> "$src/osfmk/arm64/amcc_rorgn_common.c" <<'EOF'
+
+/* fire bring-up breadcrumb for C code running on the bootstrap V=P tables (see start.s DF_MARK). */
+void df_mark(int n);
+void
+df_mark(int n)
+{
+	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(0x7ce6a000ULL + (1300ULL + (uint64_t)n * 60) * 4320);
+	for (int i = 0; i < (40 * 4320) / 4; i++) {
+		p[i] = (uint32_t)(uintptr_t)&p[i];
+	}
+	for (uintptr_t a = (uintptr_t)p; a < (uintptr_t)p + 40 * 4320; a += 64) {
+		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+EOF
+arm_init="$src/osfmk/arm/arm_init.c"
+perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$arm_init"
+perl -pi -e '
+  if (!$a && /^\tPE_init_platform\(FALSE, args\);/) { $_ = "\tdf_mark(5);\n$_\tdf_mark(6);\n"; $a = 1; }
+  elsif (!$b && /^\tml_parse_cpu_topology\(\);/) { $_ .= "\tdf_mark(7);\n"; $b = 1; }
+  elsif (!$c && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ = "\tdf_mark(8);\n$_"; $c = 1; }
+' "$arm_init"
+test "$(grep -c 'df_mark([5-8]);' "$arm_init")" -eq 4 || { echo "fix-xcode16: expected 4 df_mark calls in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
+echo "fix-xcode16: post-MMU breadcrumbs: V=P fb block, DF_MARK_C 4, df_mark 5-8 in arm_init"

@@ -241,3 +241,19 @@ perl -pi -e '
 ' "$arm_init"
 test "$(grep -c 'df_mark([5-8]);' "$arm_init")" -eq 4 || { echo "fix-xcode16: expected 4 df_mark calls in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
 echo "fix-xcode16: post-MMU breadcrumbs: V=P fb block, DF_MARK_C 4, df_mark 5-8 in arm_init"
+
+#     d. On fire XNU got through arm_vm_init's entry (9 bands). arm_vm_init then drops the bootstrap
+#        V=P tables (TTBR0 <- invalid_ttep), which removes the framebuffer mapping the breadcrumbs use.
+#        Bring-up only: keep TTBR0 on the bootstrap tables (no user space exists yet) and add
+#        breadcrumbs 9-12 after arm_vm_init, PE_init_printf, PE_init_platform(TRUE), before machine_startup.
+arm_vm_init_c="$src/osfmk/arm64/arm_vm_init.c"
+perl -0pi -e 's|\tset_mmu_ttb\(invalid_ttep & TTBR_BADDR_MASK\);\n|\t/* fix-xcode16: fire bring-up keeps the bootstrap V=P tables in TTBR0 for df_mark */\n|' "$arm_vm_init_c"
+grep -q 'fire bring-up keeps the bootstrap V=P tables' "$arm_vm_init_c" || { echo "fix-xcode16: TTBR0 keep not applied"; exit 1; }
+perl -pi -e '
+  if (!$d && /^\tarm_vm_init\(xmaxmem, args\);/) { $_ .= "\tdf_mark(9);\n"; $d = 1; }
+  elsif (!$e && /^\tPE_init_printf\(FALSE\);/) { $_ .= "\tdf_mark(10);\n"; $e = 1; }
+  elsif (!$f && /^\tPE_init_platform\(TRUE, &BootCpuData\);/) { $_ .= "\tdf_mark(11);\n"; $f = 1; }
+  elsif (!$g && /^\tmachine_startup\(args\);/) { $_ = "\tdf_mark(12);\n$_"; $g = 1; }
+' "$arm_init"
+test "$(grep -c 'df_mark(\(9\|1[0-2]\));' "$arm_init")" -eq 4 || { echo "fix-xcode16: expected df_mark 9-12 in arm_init.c"; grep -n df_mark "$arm_init"; exit 1; }
+echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

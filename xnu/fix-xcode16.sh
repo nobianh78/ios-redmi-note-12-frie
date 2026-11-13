@@ -238,20 +238,10 @@ df_mark(int n)
 
 #include "df_font8x8.h"
 /* The framebuffer is first reached through the V=P block (TTBR0). Once a user task runs, TTBR0 holds
- * that task's tables and the V=P address is gone, so switch to a kernel (TTBR1) mapping once kmem is up. */
-#include <stddef.h>          /* NULL for STARTUP(); this file only includes vm_types.h/stdbool.h */
-#include <kern/startup.h>
-extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
-static volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
-static void
-df_fb_map(void)
-{
-	vm_offset_t va = ml_io_map_wcomb(0x7ce6a000, 4320 * 2460);
-	if (va) {
-		df_fbva = (volatile uint32_t *)va;
-	}
-}
-STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, df_fb_map);
+ * that task's tables and the V=P address is gone. initialize_screen() (video_console.c) io_maps the
+ * same framebuffer into the kernel (TTBR1) and stores that address here; a second 10 MB io_map of
+ * our own does not fit in the io space (kmem_alloc ... failed with 3). */
+volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
 
 /* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
 void df_puts(const char *s, unsigned long caller);
@@ -449,8 +439,9 @@ vc_c="$(dirname "$arm_init")/../console/video_console.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
 perl -pi -e '
   if (!$a && /^\s+new_vinfo\.v_physaddr, new_vinfo\.v_width.*BRINGUP/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
-  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n"; $b = 1; }
+  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n\t\t\t\tif (newVideoVirt && new_vinfo.v_physaddr == 0x7ce6a000) { extern volatile uint32_t *df_fbva; df_fbva = (volatile uint32_t *)newVideoVirt; } /* fix-xcode16: fire log uses this kernel mapping */\n"; $b = 1; }
 ' "$vc_c"
+grep -q 'fire log uses this kernel mapping' "$vc_c" || { echo "fix-xcode16: df_fbva hook missing in video_console.c"; exit 1; }
 test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expected df_mark 11-12 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }
 #        11 bands: hang inside ml_io_map_unmappable. Mark 13 = any panic (panic_trap_to_debugger entry),
 #        to tell a silent panic from a real hang.

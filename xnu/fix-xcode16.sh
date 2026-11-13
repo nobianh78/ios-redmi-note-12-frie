@@ -328,7 +328,9 @@ test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expec
 #        Range TLBI is ARMv8.4; the Cortex-A55 is v8.2. VMAPPLE.h turns it on unconditionally.
 perl -pi -e 's|^#define __ARM_RANGE_TLBI__\s+1$|/* fix-xcode16: Cortex-A55 (v8.2) has no range TLBI */|' "$src/pexpert/pexpert/arm64/VMAPPLE.h"
 ! grep -q '__ARM_RANGE_TLBI__' "$src/pexpert/pexpert/arm64/VMAPPLE.h" || { echo "fix-xcode16: range TLBI still on"; exit 1; }
-avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
+#        pmap_switch's mixed-page-size commpage flush uses range TLBI without the guard: flush the core TLB.
+perl -0pi -e 's|\t\tconst uint64_t commpage_shift = cpu_data_ptr->commpage_page_shift;\n\t\tconst uint64_t rtlbi_param = generate_rtlbi_param\([^;]*;\n\t\tflush_core_tlb_allrange_async\(rtlbi_param\);\n|\t\tflush_core_tlb_async(); /* fix-xcode16: no range TLBI on Cortex-A55 */\n|' "$src/osfmk/arm/pmap/pmap.c"
+grep -q 'no range TLBI on Cortex-A55' "$src/osfmk/arm/pmap/pmap.c" || { echo "fix-xcode16: commpage flush patch failed"; exit 1; }avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"

@@ -716,6 +716,11 @@ grep -B1 'fire PID 1 is a static Mach-O' "$ml_c" | grep -q 'Check properties of 
 mf_c="$src/bsd/miscfs/mockfs/mockfs_fsnode.c"
 perl -pi -e 's/kalloc_type\(mockfs_fsnode_t, /kalloc_type(struct mockfs_fsnode, /; s/kfree_type\(mockfs_fsnode_t, fsnp\)/kfree_type(struct mockfs_fsnode, fsnp)/' "$mf_c"
 test "$(grep -c 'struct mockfs_fsnode, ' "$mf_c")" -eq 2 || { echo "fix-xcode16: mockfs fsnode alloc not fixed"; grep -n 'kalloc_type\|kfree_type' "$mf_c"; exit 1; }
+#        d) After "BSD root: md0" publishHiddenMedia() looks up the IOMedia metaclass, which lives in the
+#           IOStorageFamily kext (absent), and calls applyToInstances on NULL. md0 is no IOMedia: skip it.
+iosvc_cpp="$src/iokit/Kernel/IOService.cpp"
+perl -0pi -e 's|\tif \(wasHiding\) \{\n\t\tiomediaClass->applyToInstances\(publishHiddenMediaApplier, &ctx\);|\tif (wasHiding && iomediaClass) { /* fix-xcode16: no IOStorageFamily kext on fire */\n\t\tiomediaClass->applyToInstances(publishHiddenMediaApplier, &ctx);|' "$iosvc_cpp"
+grep -q 'no IOStorageFamily kext on fire' "$iosvc_cpp" || { echo "fix-xcode16: publishHiddenMedia not guarded"; grep -n -A3 'if (wasHiding)' "$iosvc_cpp"; exit 1; }
 echo "fix-xcode16: mockfs root from RAMDisk, static PID 1 allowed"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"

@@ -299,7 +299,8 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     ba->video.v_depth    = 32;
     ba->deviceTreeP      = adt_phys - phys_base + p->virt_base;   /* XNU reads the ADT through its kernel VA */
     ba->deviceTreeLength = (uint32_t)p->adt_size;
-    const char *cmd = "-v";   /* verbose console text on screen */
+    /* -v: verbose console. rd=md0: root on the /chosen/memory-map RAMDisk (mockfs serves it as /sbin/launchd). */
+    const char *cmd = "-v rd=md0";
     for (int i = 0; cmd[i] && i < BOOT_LINE_LENGTH - 1; i++) ba->CommandLine[i] = cmd[i];
 
     g_phys_base = phys_base; g_virt_base = p->virt_base; g_kernel_size = p->kernel_size;

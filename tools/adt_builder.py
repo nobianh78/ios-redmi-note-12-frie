@@ -84,6 +84,12 @@ def build_fire_adt() -> bytes:
     # starts at 0x40000000; report 256MB, which covers the 128MB the loader hands to XNU.
     chosen.add_property("dram-base", u64(0x40000000))
     chosen.add_property("dram-size", u64(0x10000000))
+    # Root device: IOFindBSDRoot turns /chosen/memory-map "RAMDisk" <base size> into /dev/md0 (boot-arg
+    # rd=md0), which mockfs serves as /sbin/launchd. The base is unknown here: xnu_flatten.js patches
+    # these 16 bytes with the ramdisk's kernel VA and size when it packs the payload.
+    memory_map = ADTNode("memory-map")
+    memory_map.add_property("RAMDisk", u64(0, 0))
+    chosen.add_child(memory_map)
     root.add_child(chosen)
 
     cpus = ADTNode("cpus")

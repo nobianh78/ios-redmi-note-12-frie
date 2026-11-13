@@ -31,8 +31,10 @@ echo "fix-xcode16: renamed duplicate pmap reserved10 (no-PAC build)"
 #    lib<MACHINE>.os.<CONFIG>.a from the KDK (makedefs/MakeInc.def). Enable the open sources, and drop
 #    PPL (config_pmap_ppl): it needs Apple's APRR/GXF hardware, which Cortex cores do not have.
 master="$src/config/MASTER.arm64.MacOSX"
-perl -pi -e 's/^(#\s*KERNEL_BASE\s*=\s*\[\s*arm64) config_pmap_ppl /$1 nos_arm_asm nos_arm_pmap /' "$master"
-grep -q 'KERNEL_BASE.*nos_arm_asm nos_arm_pmap' "$master" || { echo "fix-xcode16: MASTER nos_arm fix did not apply"; exit 1; }
+#    Also enable mockfs ("boot from an executable"): fire's root device is an in-memory Mach-O that mockfs
+#    serves as /sbin/launchd, so no HFS/APFS (closed kexts) is needed to reach userland.
+perl -pi -e 's/^(#\s*KERNEL_BASE\s*=\s*\[\s*arm64) config_pmap_ppl /$1 nos_arm_asm nos_arm_pmap mockfs /' "$master"
+grep -q 'KERNEL_BASE.*nos_arm_asm nos_arm_pmap mockfs' "$master" || { echo "fix-xcode16: MASTER nos_arm fix did not apply"; exit 1; }
 ! grep -q 'KERNEL_BASE.*config_pmap_ppl' "$master" || { echo "fix-xcode16: config_pmap_ppl still set"; exit 1; }
 
 makedef="$src/makedefs/MakeInc.def"
@@ -697,6 +699,19 @@ test "$(grep -c 'fix-xcode16' "$pt_c")" -eq 3 || { echo "fix-xcode16: pthread sh
 tcp_c="$src/bsd/netinet/tcp_subr.c"
 perl -0pi -e 's|(static void\ntcp_tfo_init\(void\)\n\{\n\tu_char key\[TCP_FASTOPEN_KEYLEN\];\n\n)|#include <libkern/crypto/register_crypto.h> /* fix-xcode16 */\nextern crypto_functions_t g_crypto_funcs;\n$1\tif (g_crypto_funcs == NULL \|\| g_crypto_funcs->ccaes_cbc_encrypt == NULL) {\n\t\tprintf("fire: no AES (corecrypto.kext absent), TCP Fast Open disabled\\n"); /* fix-xcode16 */\n\t\treturn;\n\t}\n|' "$tcp_c"
 grep -q 'TCP Fast Open disabled' "$tcp_c" || { echo "fix-xcode16: tcp_tfo_init not guarded"; grep -n -A6 '^tcp_tfo_init' "$tcp_c"; exit 1; }
+
+#        Root device: fire boots with rd=md0 and a /chosen/memory-map "RAMDisk" in the ADT; mockfs mounts it
+#        and serves it as /sbin/launchd (PID 1).
+#        a) The loader cannot know the final physical address when the ADT is packed, so on fire the
+#           RAMDisk base is the kernel VA (virtBase + offset); use it as-is instead of ml_static_ptovirt.
+iobsd_cpp="$src/iokit/bsddev/IOKitBSDInit.cpp"
+perl -pi -e 's|\(void\)mdevadd\(-1, ml_static_ptovirt\(ramdParms\[0\]\) >> 12,|(void)mdevadd(-1, ramdParms[0] >> 12, /* fix-xcode16: fire passes a kernel VA */|' "$iobsd_cpp"
+grep -q 'fire passes a kernel VA' "$iobsd_cpp" || { echo "fix-xcode16: RAMDisk VA patch failed"; grep -n 'mdevadd(-1' "$iobsd_cpp"; exit 1; }
+#        b) RELEASE kernels refuse static arm64 executables; our PID 1 is a static Mach-O (no dyld yet).
+ml_c="$src/bsd/kern/mach_loader.c"
+perl -0pi -e 's#(\t\t\t/\* Check properties of static executables \(disallowed except for development\) \*/\n)\#if !\(DEVELOPMENT \|\| DEBUG\)\n#$1\#if 0 /* fix-xcode16: fire PID 1 is a static Mach-O */\n#' "$ml_c"
+grep -B1 'fire PID 1 is a static Mach-O' "$ml_c" | grep -q 'Check properties of static executables' || { echo "fix-xcode16: static exec patch failed"; grep -n -B2 -A3 'static executables\|fire PID 1' "$ml_c"; exit 1; }
+echo "fix-xcode16: mockfs root from RAMDisk, static PID 1 allowed"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

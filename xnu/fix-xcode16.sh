@@ -329,24 +329,36 @@ df_cons_write(const char *s, int n)
  * fire bring-up: IRQ status line at row 1300 (just above the log): total IRQs, last INTID, timer
  * IRQs, CNTV_CTL_EL0. Tells whether the virtual timer interrupt (PPI 27) actually arrives.
  */
-static uint64_t df_irq_count, df_irq_timer;
+static uint64_t df_irq_count, df_irq_timer, df_irq_done, df_irq_last;
 void df_irq_stat(uint32_t id);
 void
 df_irq_stat(uint32_t id)
 {
-	char line[96];
+	char line[128];
 	int n = 0;
-	const char *lbl[4] = { "IRQ n=", " id=", " timer=", " cntv_ctl=" };
-	uint64_t ctl;
+	/* id 0xffffffff = "handler finished" (called after rtclock_intr + EOI) */
+	const char *lbl[6] = { "IRQ n=", " id=", " timer=", " done=", " cntv_ctl=", " tval=" };
+	uint64_t ctl, tval;
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
-	df_irq_count++;
-	if (id == 27 || id == 30) {
-		df_irq_timer++;
+	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
+	if (id == 0xffffffffu) {
+		df_irq_done++;
+	} else {
+		df_irq_count++;
+		df_irq_last = id;
+		if (id == 27 || id == 30) {
+			df_irq_timer++;
+		}
 	}
-	uint64_t val[4] = { df_irq_count, id, df_irq_timer, ctl };
-	for (int k = 0; k < 4; k++) {
+	int32_t stval = (int32_t)(uint32_t)tval;   /* signed: negative = already expired */
+	uint64_t val[6] = { df_irq_count, df_irq_last, df_irq_timer, df_irq_done, ctl,
+	    (uint64_t)(stval < 0 ? -(int64_t)stval : stval) };
+	for (int k = 0; k < 6; k++) {
 		for (const char *p = lbl[k]; *p; p++) {
 			line[n++] = *p;
+		}
+		if (k == 5 && stval < 0) {
+			line[n++] = '-';
 		}
 		char tmp[20];
 		int t = 0;
@@ -690,7 +702,7 @@ grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic 
 #        Non-secure kernel gets it as a Group 1 IRQ (LK already left Group 1 enabled). Ack the GIC in
 #        sleh_irq: timer PPIs (27 virtual, 30 physical) go to rtclock_intr exactly as sleh_fiq does.
 sleh_c="$src/osfmk/arm64/sleh.c"
-perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t}\n#else|' "$sleh_c"
+perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.

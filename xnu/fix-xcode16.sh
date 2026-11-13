@@ -332,6 +332,10 @@ perl -pi -e 's|^#define __ARM_RANGE_TLBI__\s+1$|/* fix-xcode16: Cortex-A55 (v8.2
 #        pmap_switch's mixed-page-size commpage flush uses range TLBI without the guard: flush the core TLB.
 perl -0pi -e 's|\t\tconst uint64_t commpage_shift = cpu_data_ptr->commpage_page_shift;\n\t\tconst uint64_t rtlbi_param = generate_rtlbi_param\([^;]*;\n\t\tflush_core_tlb_allrange_async\(rtlbi_param\);\n|\t\tflush_core_tlb_async(); /* fix-xcode16: no range TLBI on Cortex-A55 */\n|' "$src/osfmk/arm/pmap/pmap.c"
 grep -q 'no range TLBI on Cortex-A55' "$src/osfmk/arm/pmap/pmap.c" || { echo "fix-xcode16: commpage flush patch failed"; exit 1; }
+#        Next panic: "Undefined kernel instruction" on msr DIT (cswitch.s, under __ARM_ARCH_8_4__).
+#        VMAPPLE builds with -march=armv8.5a, so the compiler emits v8.4/8.5-only code; the A55 is v8.2.
+perl -pi -e 's|^(MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE\s+)-march=armv8\.5a|$1-march=armv8.2-a|' "$src/makedefs/MakeInc.def"
+grep -q 'BOARD_CONFIG_VMAPPLE *-march=armv8.2-a' "$src/makedefs/MakeInc.def" || { echo "fix-xcode16: VMAPPLE -march not lowered"; grep -n VMAPPLE "$src/makedefs/MakeInc.def"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

@@ -657,6 +657,16 @@ grep -q 'GIC/timer state dump' "$fiq_dump_c" || { echo "fix-xcode16: GIC dump no
 bi_c="$src/bsd/kern/bsd_init.c"
 perl -0pi -e 's|#define DEBUG_BSDINIT 0\n|#define DEBUG_BSDINIT 1 /* fix-xcode16: fire on-screen trace */\n|; s|#define bsd_init_kprintf\(x, \.\.\.\) kprintf\("bsd_init: " x, ## __VA_ARGS__\)|#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)|' "$bi_c"
 grep -q 'define bsd_init_kprintf(x, ...) printf' "$bi_c" && grep -q 'DEBUG_BSDINIT 1' "$bi_c" || { echo "fix-xcode16: bsd_init trace not enabled"; exit 1; }
+#        BSD is up on fire (Regents copyright banner). Next panic: pthread kext not loaded (open-source
+#        libpthread, but shipped as a kext; no kexts here). Boot on without it for now.
+#        shortcut: userland threads need libpthread's kern part built into the kernel before launchd.
+pt_c="$src/bsd/pthread/pthread_shims.c"
+perl -0pi -e '
+  s|\tif \(!pthread_functions\) \{\n\t\tpanic\("pthread kernel extension not loaded \(function table is NULL\)."\);\n\t\}\n\tpthread_functions->pthread_init\(\);|\tif (!pthread_functions) {\n\t\tprintf("fire: pthread kext not loaded, continuing without it\\n"); /* fix-xcode16 */\n\t\treturn;\n\t}\n\tpthread_functions->pthread_init();|;
+  s|(\npth_proc_hashinit\(proc_t p\)\n\{\n)|$1\tif (!pthread_functions) {\n\t\treturn; /* fix-xcode16 */\n\t}\n|;
+  s|(\npth_proc_hashdelete\(proc_t p\)\n\{\n)|$1\tif (!pthread_functions) {\n\t\treturn; /* fix-xcode16 */\n\t}\n|;
+' "$pt_c"
+test "$(grep -c 'fix-xcode16' "$pt_c")" -eq 3 || { echo "fix-xcode16: pthread shims not patched"; grep -n -A6 'pthread_init(void)\|pth_proc_hash' "$pt_c"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

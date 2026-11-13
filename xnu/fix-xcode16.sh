@@ -401,6 +401,96 @@ df_crypto_register(void)
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, df_crypto_register);
 EOF
 echo "fix-xcode16: registered a minimal kmem RNG in place of corecrypto.kext"
+
+#        Next panic: instruction fetch at 0 from read_random(): the kernel PRNG (cckprng) is also
+#        registered by corecrypto.kext via register_and_init_prng(). Install our own on first use.
+prng_c="$src/osfmk/prng/prng_random.c"
+perl -0pi -e 's|(static SECURITY_READ_ONLY_LATE\(int\) prng_ready;\n)|$1static void df_prng_install(void); /* fix-xcode16 */\n|' "$prng_c"
+perl -0pi -e 's|(\nread_random\(void \* buffer, u_int numbytes\)\n\{\n)|$1\tif (!prng_ready) {\n\t\tdf_prng_install(); /* fix-xcode16 */\n\t}\n|; s|(\nwrite_random\(void \* buffer, u_int numbytes\)\n\{\n)|$1\tif (!prng_ready) {\n\t\tdf_prng_install(); /* fix-xcode16 */\n\t}\n|' "$prng_c"
+cat >> "$prng_c" <<'EOF'
+
+/*
+ * fix-xcode16 (fire bring-up): no corecrypto.kext, so no cckprng. Minimal per-CPU generator
+ * registered through the normal register_and_init_prng() path on first use.
+ * shortcut: xorshift64* seeded from bootseed + timebase is NOT cryptographically secure;
+ * replace with a real DRBG (e.g. HMAC-DRBG over the kernel's SHA256) before trusting /dev/random.
+ */
+static uint64_t df_prng_state[MAX_CPUS];
+static struct cckprng_ctx df_prng_ctx;
+
+static uint64_t
+df_prng_mix(const void *p, size_t n, uint64_t h)
+{
+	const uint8_t *b = p;
+	for (size_t i = 0; i < n; i++) {
+		h = (h ^ b[i]) * 0x100000001b3ULL;   /* FNV-1a */
+	}
+	return h;
+}
+
+static void
+df_prng_init_with_getentropy(struct cckprng_ctx *ctx __unused, unsigned max_ngens __unused, size_t seed_nbytes,
+    const void *seed, size_t nonce_nbytes, const void *nonce, cckprng_getentropy getentropy __unused,
+    void *getentropy_arg __unused)
+{
+	uint64_t h = df_prng_mix(seed, seed_nbytes, 0xcbf29ce484222325ULL);
+	h = df_prng_mix(nonce, nonce_nbytes, h);
+	for (unsigned i = 0; i < MAX_CPUS; i++) {
+		df_prng_state[i] = (h ^ (0x9e3779b97f4a7c15ULL * (i + 1))) | 1;
+	}
+}
+
+static void
+df_prng_initgen(struct cckprng_ctx *ctx __unused, unsigned gen_idx __unused)
+{
+}
+
+static void
+df_prng_reseed(struct cckprng_ctx *ctx __unused, size_t nbytes, const void *seed)
+{
+	for (unsigned i = 0; i < MAX_CPUS; i++) {
+		df_prng_state[i] = df_prng_mix(seed, nbytes, df_prng_state[i]) | 1;
+	}
+}
+
+static void
+df_prng_refresh(struct cckprng_ctx *ctx __unused)
+{
+}
+
+static void
+df_prng_generate(struct cckprng_ctx *ctx __unused, unsigned gen_idx, size_t nbytes, void *out)
+{
+	uint64_t *s = &df_prng_state[gen_idx < MAX_CPUS ? gen_idx : 0];
+	uint8_t *o = out;
+	while (nbytes) {
+		uint64_t x = *s;
+		x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+		*s = x;
+		x *= 0x2545F4914F6CDD1DULL;   /* xorshift64* */
+		size_t n = nbytes < sizeof(x) ? nbytes : sizeof(x);
+		memcpy(o, &x, n);
+		o += n;
+		nbytes -= n;
+	}
+}
+
+static const struct cckprng_funcs df_prng_funcs = {
+	.initgen = df_prng_initgen,
+	.reseed = df_prng_reseed,
+	.refresh = df_prng_refresh,
+	.generate = df_prng_generate,
+	.init_with_getentropy = df_prng_init_with_getentropy,
+};
+
+static void
+df_prng_install(void)
+{
+	register_and_init_prng(&df_prng_ctx, &df_prng_funcs);
+}
+EOF
+test "$(grep -c 'df_prng_install(); /\* fix-xcode16 \*/' "$prng_c")" -eq 2 || { echo "fix-xcode16: prng install hooks missing"; grep -n df_prng_install "$prng_c"; exit 1; }
+echo "fix-xcode16: installed a minimal kernel PRNG in place of cckprng"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

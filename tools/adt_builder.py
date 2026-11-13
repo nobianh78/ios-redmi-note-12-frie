@@ -80,6 +80,10 @@ def build_fire_adt() -> bytes:
     # early_random() -> bootseed_init_bootloader() panics unless PE_get_random_seed() returns
     # 64 bytes from /chosen "random-seed" (xnu-8796 osfmk/prng/prng_random.c). Fresh per build.
     chosen.add_property("random-seed", os.urandom(64))
+    # arm_init() panics without these (osfmk/arm/arm_init.c, read as unsigned long). MT6768 DRAM
+    # starts at 0x40000000; report 256MB, which covers the 128MB the loader hands to XNU.
+    chosen.add_property("dram-base", u64(0x40000000))
+    chosen.add_property("dram-size", u64(0x10000000))
     root.add_child(chosen)
 
     cpus = ADTNode("cpus")

@@ -239,6 +239,7 @@ df_mark(int n)
 #include "df_font8x8.h"
 /* The framebuffer is first reached through the V=P block (TTBR0). Once a user task runs, TTBR0 holds
  * that task's tables and the V=P address is gone, so switch to a kernel (TTBR1) mapping once kmem is up. */
+#include <stddef.h>          /* NULL for STARTUP(); this file only includes vm_types.h/stdbool.h */
 #include <kern/startup.h>
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 static volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;

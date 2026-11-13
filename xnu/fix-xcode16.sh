@@ -424,9 +424,9 @@ perl -0pi -e '
   s|\tgicr_write32\(GICR_IGROUPR0, 0x81FFFFFF\);\n|\t/* fix-xcode16: NS EL1 cannot regroup; PPIs stay Group 1 NS */\n|;
   s|"ICC_BPR0_EL1"|"ICC_BPR1_EL1"|;
   s#\tuint32_t gicd_ctlr = gicd_read32\(GICD_CTLR\);\n\tgicd_ctlr \|= GICD_CTLR_ENABLEGRP0;\n\tgicd_write32\(GICD_CTLR, gicd_ctlr\);\n#\t/* fix-xcode16: GICD_CTLR is configured by the secure firmware */\n#;
-  s|\t__builtin_arm_wsr64\("ICC_IGRPEN0_EL1", 1\);\n|\t/* fix-xcode16: leave ICC_IGRPEN1_EL1 off for now. With Group 1 on, the vtimer arrives as an IRQ\n\t * during early boot and the kalloc_type tables on the boot stack got overwritten (different\n\t * garbage every boot). Early boot needs no interrupts; enable once the IRQ path is wired up. */\n|;
+  s|"ICC_IGRPEN0_EL1"|"ICC_IGRPEN1_EL1"|;
 ' "$fiq_c"
-for want in 'NS EL1 cannot regroup' 'ICC_BPR1_EL1' 'configured by the secure firmware' 'leave ICC_IGRPEN1_EL1 off'; do
+for want in 'NS EL1 cannot regroup' 'ICC_BPR1_EL1' 'configured by the secure firmware' 'ICC_IGRPEN1_EL1'; do
 	grep -q "$want" "$fiq_c" || { echo "fix-xcode16: pe_fiq Group 1 patch missing: $want"; exit 1; }
 done
 ! grep -q 'GICD_CTLR_ENABLEGRP0\|ICC_IGRPEN0_EL1\|0x81FFFFFF' "$fiq_c" || { echo "fix-xcode16: pe_fiq still has Group 0 setup"; grep -n 'GRP0\|IGRPEN0\|0x81FF' "$fiq_c"; exit 1; }
@@ -447,6 +447,13 @@ perl -0pi -e 's|(\t    kt_zones_sig, kt_zones_type, kt_fixed_zones\);\n)|$1\tfor
 grep -q 'leave room for the shared zone' "$kalloc_c" || { echo "fix-xcode16: kalloc_type clamp not inserted"; exit 1; }
 perl -0pi -e 's|(\t\tassert\(n_zones_sig \+ n_zones_type \+ 1 <= 32\);\n)|\t\tif (n_zones_sig + n_zones_type > 32) { /* fix-xcode16: fire diagnostics */\n\t\t\tstatic char df_kt[1536]; int df_o = 0;\n\t\t\tfor (uint16_t j = 0; j < MAX_K_ZONE(kt_zone_cfg) && df_o < (int)sizeof(df_kt) - 40; j++) {\n\t\t\t\tdf_o += snprintf(df_kt + df_o, sizeof(df_kt) - df_o, "%u:%u/%u/%u/%u ", kt_zone_cfg[j], kt_freq_list[j], kt_freq_list_total[j], kt_zones_sig[j], kt_zones_type[j]);\n\t\t\t}\n\t\t\tpanic("fire kt i=%u budget=%u: %s", i, kt_fixed_zones, df_kt);\n\t\t}\n$1|' "$kalloc_c"
 grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic not inserted"; exit 1; }
+#        Next panic: an IRQ during early boot reached PE_handle_ext_interrupt -> gCPUIC (IOKit's interrupt
+#        controller, not created yet) == NULL. On VMAPPLE the timer is a Group 0 FIQ; on MediaTek a
+#        Non-secure kernel gets it as a Group 1 IRQ (LK already left Group 1 enabled). Ack the GIC in
+#        sleh_irq: timer PPIs (27 virtual, 30 physical) go to rtclock_intr exactly as sleh_fiq does.
+sleh_c="$src/osfmk/arm64/sleh.c"
+perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t}\n#else|' "$sleh_c"
+grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
 perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); static char df_b[3072]; strlcpy(df_b, "PANIC: ", sizeof(df_b)); if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"

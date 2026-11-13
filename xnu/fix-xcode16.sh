@@ -629,6 +629,16 @@ grep -q 'using generic IOPlatformExpert' "$pe_cpp" || { echo "fix-xcode16: IOPan
 sio_cpp="$src/iokit/Kernel/IOStartIOKit.cpp"
 perl -0pi -e 's|// RTC is not present on this target\n#ifndef BCM2837\n|// RTC is not present on this target\n#if 0 /* fix-xcode16: no Darwin RTC driver on fire */\n|' "$sio_cpp"
 grep -q 'no Darwin RTC driver on fire' "$sio_cpp" || { echo "fix-xcode16: IORTC wait not removed"; exit 1; }
+
+#        With the RTC wait gone the log still stops after the platform expert, and the IRQ status line
+#        never appears (no IRQ at all). Make the kernel_bootstrap step log always visible on screen,
+#        and dump the GIC/timer state at the end of pe_init_fiq.
+st_c="$src/osfmk/kern/startup.c"
+perl -0pi -e 's|\tif \(\(startup_debug & STARTUP_DEBUG_VERBOSE\) &&\n\t    startup_phase >= STARTUP_SUB_KPRINTF\) \{\n\t\tkprintf\("kernel_bootstrap: %s\\n", message\);\n\t\}|\tprintf("kernel_bootstrap: %s\\n", message); /* fix-xcode16: fire on-screen trace */|; s|\tif \(\(startup_debug & STARTUP_DEBUG_VERBOSE\) &&\n\t    startup_phase >= STARTUP_SUB_KPRINTF\) \{\n\t\tkprintf\("kernel_bootstrap_thread: %s\\n", message\);\n\t\}|\tprintf("kernel_bootstrap_thread: %s\\n", message); /* fix-xcode16: fire on-screen trace */|' "$st_c"
+test "$(grep -c 'fire on-screen trace' "$st_c")" -eq 2 || { echo "fix-xcode16: bootstrap trace not patched"; grep -n -A6 '^kernel_bootstrap_log\|^kernel_bootstrap_thread_log' "$st_c"; exit 1; }
+fiq_dump_c="$src/pexpert/arm/pe_fiq.c"
+perl -0pi -e 's|(\t__builtin_arm_isb\(ISB_SY\);\n\}\n#else\nvoid\npe_init_fiq)|\t{ /* fix-xcode16: GIC/timer state dump */\n\t\textern int printf(const char *, ...);\n\t\tprintf("fire gic: ISENABLER0=%x IGROUPR0=%x IPRIO27=%x WAKER=%x GICD_CTLR=%x\\n",\n\t\t    gicr_read32(GICR_ISENABLER0), gicr_read32(GICR_IGROUPR0), gicr_read32(0x10418) >> 24, gicr_read32(GICR_WAKER), gicd_read32(GICD_CTLR));\n\t\tprintf("fire icc: PMR=%llx IGRPEN1=%llx CTLR=%llx SRE=%llx CNTV_CTL=%llx DAIF=%llx\\n",\n\t\t    __builtin_arm_rsr64("ICC_PMR_EL1"), __builtin_arm_rsr64("ICC_IGRPEN1_EL1"), __builtin_arm_rsr64("ICC_CTLR_EL1"),\n\t\t    __builtin_arm_rsr64("ICC_SRE_EL1"), __builtin_arm_rsr64("CNTV_CTL_EL0"), __builtin_arm_rsr64("DAIF"));\n\t}\n$1|' "$fiq_dump_c"
+grep -q 'GIC/timer state dump' "$fiq_dump_c" || { echo "fix-xcode16: GIC dump not inserted"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

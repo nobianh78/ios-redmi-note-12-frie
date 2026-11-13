@@ -96,14 +96,23 @@ def build_fire_adt() -> bytes:
     cpus.add_child(cpu0)
     root.add_child(cpus)
 
-    # MT6768 peripherals live at 0x10000000..0x1fffffff (TOPRGU 0x10007000, UART 0x11002000,
-    # DISP 0x14000000). ranges = <child-base parent-base size>, 64-bit each.
+    # MT6768 peripherals live at 0x0c000000..0x1fffffff (GIC 0x0c000000, TOPRGU 0x10007000,
+    # UART 0x11002000, DISP 0x14000000). ranges = <child-base parent-base size>, 64-bit each;
+    # XNU uses the parent base as the SoC base and adds it to child "reg" offsets.
+    soc_base = 0x0C000000
     arm_io = ADTNode("arm-io")
     arm_io.add_property("device_type", cstr("fire-io"))
     arm_io.add_property("compatible", cstr("fire-io"))
-    arm_io.add_property("ranges", u64(0x0, 0x10000000, 0x10000000))
+    arm_io.add_property("ranges", u64(0x0, soc_base, 0x20000000 - soc_base))
     arm_io.add_property("#address-cells", u32(2))
     arm_io.add_property("#size-cells", u32(2))
+
+    # pe_init_fiq() (pexpert/arm/pe_fiq.c) panics without /arm-io/gic. reg = GICD off/size,
+    # GICR off/size, relative to the SoC base. Values from the stock fire DTB (arm,gic-v3 node).
+    gic = ADTNode("gic")
+    gic.add_property("compatible", cstr("arm,gic-v3"))
+    gic.add_property("reg", u64(0x0C000000 - soc_base, 0x40000, 0x0C040000 - soc_base, 0x200000))
+    arm_io.add_child(gic)
     root.add_child(arm_io)
 
     return root.serialize()

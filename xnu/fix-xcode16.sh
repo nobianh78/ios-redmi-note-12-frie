@@ -324,6 +324,10 @@ test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expec
 #        to tell a silent panic from a real hang.
 #        Bands 11 + 13 (panic): pmap_map_bd "no PTE" for the early framebuffer io_map -- arm_vm_init's
 #        pre-built L3 tables past dynamic_memory_begin ran out. Pre-build 64MB more.
+#        The panic printer showed the real cause: "Undefined kernel instruction" on tlbi rvale1is.
+#        Range TLBI is ARMv8.4; the Cortex-A55 is v8.2. VMAPPLE.h turns it on unconditionally.
+perl -pi -e 's|^#define __ARM_RANGE_TLBI__\s+1$|/* fix-xcode16: Cortex-A55 (v8.2) has no range TLBI */|' "$src/pexpert/pexpert/arm64/VMAPPLE.h"
+! grep -q '__ARM_RANGE_TLBI__' "$src/pexpert/pexpert/arm64/VMAPPLE.h" || { echo "fix-xcode16: range TLBI still on"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

@@ -329,6 +329,6 @@ perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
-perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ char df_b[512] = "PANIC: "; if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"
+perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); char df_b[512] = "PANIC: "; if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"
 grep -q 'df_mark(13);' "$dbg_c" || { echo "fix-xcode16: expected df_mark 13 in debug.c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

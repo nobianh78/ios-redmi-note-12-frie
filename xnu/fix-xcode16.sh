@@ -276,8 +276,61 @@ df_puts(const char *s, unsigned long caller)
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
+
+/*
+ * fire bring-up: mirror every console_write() (all kernel printf output) to the L3 layer as text,
+ * rows 1310..2030 (the panic printer owns 2040..2460). 135 cols x 80 lines, wraps to the top.
+ * shortcut: no lock, no scrolling; fine on one CPU during bring-up, replace with a real fb console later.
+ */
+static unsigned df_con_row, df_con_col;
+void df_cons_write(const char *s, int n);
+void
+df_cons_write(const char *s, int n)
+{
+	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+	const unsigned pitch = 4320 / 4, top = 1310, rows = (2030 - 1310) / 9, cols = 1080 / 8;
+	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	for (int i = 0; i < n; i++) {
+		char c = s[i];
+		if (c == '\n' || df_con_col == cols) {
+			df_con_col = 0;
+			df_con_row = (df_con_row + 1) % rows;
+			for (unsigned y = 0; y < 9; y++) {          /* clear the new line */
+				volatile uint32_t *line = &fb[(top + df_con_row * 9 + y) * pitch];
+				for (unsigned x = 0; x < 1080; x++) {
+					line[x] = 0xff000000;
+				}
+				for (uintptr_t a = (uintptr_t)line; a < (uintptr_t)(line + 1080); a += 64) {
+					__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+				}
+			}
+			if (c == '\n') {
+				continue;
+			}
+		}
+		if (c == '\r') {
+			continue;
+		}
+		unsigned ch = (c == '\t') ? ' ' : (c < 0x20 || c > 0x7e) ? '?' : (unsigned)c;
+		for (int fy = 0; fy < 8; fy++) {
+			uint8_t bits = font8x8[ch - 0x20][fy];
+			volatile uint32_t *px = &fb[(top + df_con_row * 9 + fy) * pitch + df_con_col * 8];
+			for (int fx = 0; fx < 8; fx++) {
+				px[fx] = (bits & (1 << fx)) ? 0xffffffff : 0xff000000;
+			}
+			__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)px) : "memory");
+		}
+		df_con_col++;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
 EOF
 cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
+#        Fire now hangs silently after IOKit started (likely waiting for a root device): mirror all
+#        console output to the screen so the kernel log is readable.
+sc_c="$src/osfmk/console/serial_console.c"
+perl -0pi -e 's|^|extern void df_cons_write(const char *, int); /* fix-xcode16: fire on-screen log */\n|; s|(\nconsole_write\(char \*str, int size\)\n\{\n\tassert\(str != NULL\);\n)|$1\tdf_cons_write(str, size); /* fix-xcode16 */\n|' "$sc_c"
+grep -q 'df_cons_write(str, size); /\* fix-xcode16' "$sc_c" || { echo "fix-xcode16: console_write hook missing"; exit 1; }
 arm_init="$src/osfmk/arm/arm_init.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$arm_init"
 perl -pi -e '

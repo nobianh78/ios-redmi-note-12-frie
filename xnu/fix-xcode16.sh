@@ -334,6 +334,19 @@ grep -q 'no range TLBI on Cortex-A55' "$src/osfmk/arm/pmap/pmap.c" || { echo "fi
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }
+#        With /arm-io/gic in the ADT, fire hangs silently (no panic) in pe_init_fiq. Marks 14-18 bisect it:
+#        14 after GICD/GICR io_map, 15 after GICR_WAKER wake, 16 after ICC_SRE, 17 after BPR0/PMR/CTLR,
+#        18 at the end (after GICD_CTLR + ICC_IGRPEN0).
+fiq_c="$src/pexpert/arm/pe_fiq.c"
+perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up */\n|' "$fiq_c"
+perl -pi -e '
+  if (!$a && /^\t\tgicr_size = gicr_size_prop;/) { $_ .= "\t\tdf_mark(14);\n"; $a = 1; }
+  elsif (!$b && m{^\t// Configure timers and legacy FIQ to be group 0}) { $_ = "\tdf_mark(15);\n$_"; $b = 1; }
+  elsif (!$c && m{^\t// Set priority masks and binary point for group 0}) { $_ = "\tdf_mark(16);\n$_"; $c = 1; }
+  elsif (!$d && m{^\t// Enable the forwarding of the vtimer interrupt}) { $_ = "\tdf_mark(17);\n$_"; $d = 1; }
+  elsif (!$e && /^\t__builtin_arm_wsr64\("ICC_IGRPEN0_EL1", 1\);/) { $_ .= "\tdf_mark(18);\n"; $e = 1; }
+' "$fiq_c"
+test "$(grep -c 'df_mark(1[4-8]);' "$fiq_c")" -eq 5 || { echo "fix-xcode16: expected df_mark 14-18 in pe_fiq.c"; grep -n df_mark "$fiq_c"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
 perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); char df_b[512] = "PANIC: "; if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"

@@ -651,6 +651,11 @@ test "$(grep -c 'fire on-screen trace' "$st_c")" -eq 2 || { echo "fix-xcode16: b
 fiq_dump_c="$src/pexpert/arm/pe_fiq.c"
 perl -0pi -e 's|(\t__builtin_arm_isb\(ISB_SY\);\n\}\n#else\nvoid\npe_init_fiq)|\t{ /* fix-xcode16: GIC/timer state dump (printf is already declared here) */\n\t\tprintf("fire gic: ISENABLER0=%x IGROUPR0=%x IPRIO27=%x WAKER=%x GICD_CTLR=%x\\n",\n\t\t    gicr_read32(GICR_ISENABLER0), gicr_read32(GICR_IGROUPR0), gicr_read32(0x10418) >> 24, gicr_read32(GICR_WAKER), gicd_read32(GICD_CTLR));\n\t\tprintf("fire icc: PMR=%llx IGRPEN1=%llx CTLR=%llx SRE=%llx CNTV_CTL=%llx DAIF=%llx\\n",\n\t\t    __builtin_arm_rsr64("ICC_PMR_EL1"), __builtin_arm_rsr64("ICC_IGRPEN1_EL1"), __builtin_arm_rsr64("ICC_CTLR_EL1"),\n\t\t    __builtin_arm_rsr64("ICC_SRE_EL1"), __builtin_arm_rsr64("CNTV_CTL_EL0"), __builtin_arm_rsr64("DAIF"));\n\t}\n$1|' "$fiq_dump_c"
 grep -q 'GIC/timer state dump' "$fiq_dump_c" || { echo "fix-xcode16: GIC dump not inserted"; exit 1; }
+#        Timer IRQs now flow, but the log still ends after the platform expert while kernel_bootstrap_thread
+#        has moved on to bsd_init (silent: its trace is kprintf behind DEBUG_BSDINIT 0). Show it on screen.
+bi_c="$src/bsd/kern/bsd_init.c"
+perl -0pi -e 's|#define DEBUG_BSDINIT 0\n|#define DEBUG_BSDINIT 1 /* fix-xcode16: fire on-screen trace */\n|; s|#define bsd_init_kprintf\(x, \.\.\.\) kprintf\("bsd_init: " x, ## __VA_ARGS__\)|#define bsd_init_kprintf(x, ...) printf("bsd_init: " x, ## __VA_ARGS__)|' "$bi_c"
+grep -q 'define bsd_init_kprintf(x, ...) printf' "$bi_c" && grep -q 'DEBUG_BSDINIT 1' "$bi_c" || { echo "fix-xcode16: bsd_init trace not enabled"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

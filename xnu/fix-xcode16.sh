@@ -574,6 +574,13 @@ grep -q 'MRS SSBS needs FEAT_SSBS2' "$cp_c" || { echo "fix-xcode16: SSBS2 check 
 pe_cpp="$src/iokit/Kernel/IOPlatformExpert.cpp"
 perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n\t    platform_name\);\n\n\treturn false;|\t/* fix-xcode16: no platform kext on fire: fall back to the generic IOPlatformExpert */\n\tIOLog("fire: no driver for platform \\"%s\\", using generic IOPlatformExpert\\n", platform_name);\n\treturn IOPlatformExpert::start(provider);|' "$pe_cpp"
 grep -q 'using generic IOPlatformExpert' "$pe_cpp" || { echo "fix-xcode16: IOPanicPlatform not patched"; grep -n -A8 'IOPanicPlatform::start' "$pe_cpp"; exit 1; }
+
+#        First on-screen kernel log on fire ends right after the platform expert: IOKitInitializeTime
+#        waits up to 30 s for an IORTC resource (closed RTC kext). No Darwin RTC driver on fire: skip it,
+#        as xnu already does for BCM2837.
+sio_cpp="$src/iokit/Kernel/IOStartIOKit.cpp"
+perl -0pi -e 's|// RTC is not present on this target\n#ifndef BCM2837\n|// RTC is not present on this target\n#if 0 /* fix-xcode16: no Darwin RTC driver on fire */\n|' "$sio_cpp"
+grep -q 'no Darwin RTC driver on fire' "$sio_cpp" || { echo "fix-xcode16: IORTC wait not removed"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

@@ -721,6 +721,12 @@ grep -B1 'fire PID 1 is a static Mach-O' "$ml_c" | grep -q 'Check properties of 
 mf_c="$src/bsd/miscfs/mockfs/mockfs_fsnode.c"
 perl -pi -e 's/kalloc_type\(mockfs_fsnode_t, /kalloc_type(struct mockfs_fsnode, /; s/kfree_type\(mockfs_fsnode_t, fsnp\)/kfree_type(struct mockfs_fsnode, fsnp)/' "$mf_c"
 test "$(grep -c 'struct mockfs_fsnode, ' "$mf_c")" -eq 2 || { echo "fix-xcode16: mockfs fsnode alloc not fixed"; grep -n 'kalloc_type\|kfree_type' "$mf_c"; exit 1; }
+#           The memory-backed shortcut maps the file straight from memdev's base, but mi_base is a uint32_t
+#           page number (our base is a 64-bit kernel VA) and mockfs shifts it by PAGE_SHIFT (14) where memdev
+#           uses 12: pmap_find_phys gets a bogus VA -> panic. Read through md0's strategy routine instead.
+mfv_c="$src/bsd/miscfs/mockfs/mockfs_vfsops.c"
+perl -pi -e 's/(mockfs_mount_data->mockfs_memory_backed = )memdev_info\.mi_mdev;/$1FALSE; \/* fix-xcode16: mi_base truncates a 64-bit VA *\//' "$mfv_c"
+grep -q 'mi_base truncates' "$mfv_c" || { echo "fix-xcode16: mockfs memory_backed not disabled"; grep -n 'memory_backed' "$mfv_c"; exit 1; }
 #        d) After "BSD root: md0" publishHiddenMedia() looks up the IOMedia metaclass, which lives in the
 #           IOStorageFamily kext (absent), and calls applyToInstances on NULL. md0 is no IOMedia: skip it.
 iosvc_cpp="$src/iokit/Kernel/IOService.cpp"

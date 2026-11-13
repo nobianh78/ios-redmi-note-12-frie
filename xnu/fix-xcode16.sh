@@ -336,6 +336,71 @@ grep -q 'no range TLBI on Cortex-A55' "$src/osfmk/arm/pmap/pmap.c" || { echo "fi
 #        VMAPPLE builds with -march=armv8.5a, so the compiler emits v8.4/8.5-only code; the A55 is v8.2.
 perl -pi -e 's|^(MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE\s+)-march=armv8\.5a|$1-march=armv8.2-a|' "$src/makedefs/MakeInc.def"
 grep -q 'BOARD_CONFIG_VMAPPLE *-march=armv8.2-a' "$src/makedefs/MakeInc.def" || { echo "fix-xcode16: VMAPPLE -march not lowered"; grep -n VMAPPLE "$src/makedefs/MakeInc.def"; exit 1; }
+#        Next panic: NULL g_crypto_funcs in kmem_crypto_init (EARLY_BOOT). On macOS the closed
+#        corecrypto.kext registers those functions; this kernel boots without kexts. Register our own
+#        minimal RNG for the four random_* entries kmem uses (the others stay NULL until something needs them).
+cat >> "$src/libkern/crypto/register_crypto.c" <<'EOF'
+
+/*
+ * fix-xcode16 (fire bring-up): no corecrypto.kext, so provide the random_* entries kmem needs at
+ * EARLY_BOOT. shortcut: xorshift64 seeded from early_random(); kmem's generator is documented as
+ * non-cryptographic, but random_generate/uniform are not: replace with a real DRBG before relying on them.
+ */
+#include <kern/startup.h>
+#include <string.h>
+extern uint64_t early_random(void);
+
+static void
+df_rng_generate(crypto_random_ctx_t ctx, void *random, size_t random_size)
+{
+	uint64_t *state = ctx;
+	uint8_t *out = random;
+	while (random_size) {
+		uint64_t x = *state;
+		x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+		*state = x;
+		size_t n = random_size < sizeof(x) ? random_size : sizeof(x);
+		memcpy(out, &x, n);
+		out += n;
+		random_size -= n;
+	}
+}
+
+static void
+df_rng_uniform(crypto_random_ctx_t ctx, uint64_t bound, uint64_t *random)
+{
+	uint64_t x;
+	df_rng_generate(ctx, &x, sizeof(x));
+	*random = bound ? x % bound : 0;
+}
+
+static size_t
+df_rng_kmem_ctx_size(void)
+{
+	return sizeof(uint64_t);
+}
+
+static void
+df_rng_kmem_init(crypto_random_ctx_t ctx)
+{
+	*(uint64_t *)ctx = early_random() | 1;   /* xorshift state must be non-zero */
+}
+
+static struct crypto_functions df_crypto_funcs = {
+	.random_generate_fn = df_rng_generate,
+	.random_uniform_fn = df_rng_uniform,
+	.random_kmem_ctx_size_fn = df_rng_kmem_ctx_size,
+	.random_kmem_init_fn = df_rng_kmem_init,
+};
+
+static void
+df_crypto_register(void)
+{
+	register_crypto_functions(&df_crypto_funcs);
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, df_crypto_register);
+EOF
+echo "fix-xcode16: registered a minimal kmem RNG in place of corecrypto.kext"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

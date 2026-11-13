@@ -365,7 +365,12 @@ done
 #        count (x25) was 0xfe10, a uint16 underflow from kalloc_type_apply_policy. Panic with the whole
 #        per-sizeclass table (size:unique_sig/total_types/zones_sig/zones_type) to see where it goes wrong.
 kalloc_c="$src/osfmk/kern/kalloc.c"
-perl -0pi -e 's|(\t\tassert\(n_zones_sig \+ n_zones_type \+ 1 <= 32\);\n)|\t\tif (n_zones_sig + n_zones_type + 1 > 32) { /* fix-xcode16: fire diagnostics */\n\t\t\tstatic char df_kt[1536]; int df_o = 0;\n\t\t\tfor (uint16_t j = 0; j < MAX_K_ZONE(kt_zone_cfg) && df_o < (int)sizeof(df_kt) - 40; j++) {\n\t\t\t\tdf_o += snprintf(df_kt + df_o, sizeof(df_kt) - df_o, "%u:%u/%u/%u/%u ", kt_zone_cfg[j], kt_freq_list[j], kt_freq_list_total[j], kt_zones_sig[j], kt_zones_type[j]);\n\t\t\t}\n\t\t\tpanic("fire kt i=%u budget=%u: %s", i, kt_fixed_zones, df_kt);\n\t\t}\n$1|' "$kalloc_c"
+#        The table showed size 32 gets 7+25 = 32 zones: fits the array, so the policy is fine. Only flag a
+#        real overflow (> 32), and trap inside the creation loop itself: if i passes 32 while kt_zones
+#        says 32, a callee is clobbering the loop's callee-saved registers.
+perl -0pi -e 's|(\tfor \(uint16_t i = 0; i < kt_zones; i\+\+\) \{\n\t\tz_name = zalloc_permanent)|\tfor (uint16_t i = 0; i < kt_zones; i++) {\n\t\tif (i >= 32) { panic("fire kt loop overflow: i=%u kt_zones=%u z_size=%lu", i, kt_zones, (unsigned long)z_size); } /* fix-xcode16 */\n\t\tz_name = zalloc_permanent|' "$kalloc_c"
+grep -q 'fire kt loop overflow' "$kalloc_c" || { echo "fix-xcode16: kalloc_type loop check not inserted"; exit 1; }
+perl -0pi -e 's|(\t\tassert\(n_zones_sig \+ n_zones_type \+ 1 <= 32\);\n)|\t\tif (n_zones_sig + n_zones_type > 32) { /* fix-xcode16: fire diagnostics */\n\t\t\tstatic char df_kt[1536]; int df_o = 0;\n\t\t\tfor (uint16_t j = 0; j < MAX_K_ZONE(kt_zone_cfg) && df_o < (int)sizeof(df_kt) - 40; j++) {\n\t\t\t\tdf_o += snprintf(df_kt + df_o, sizeof(df_kt) - df_o, "%u:%u/%u/%u/%u ", kt_zone_cfg[j], kt_freq_list[j], kt_freq_list_total[j], kt_zones_sig[j], kt_zones_type[j]);\n\t\t\t}\n\t\t\tpanic("fire kt i=%u budget=%u: %s", i, kt_fixed_zones, df_kt);\n\t\t}\n$1|' "$kalloc_c"
 grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic not inserted"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.

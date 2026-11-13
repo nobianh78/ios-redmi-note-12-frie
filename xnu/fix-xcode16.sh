@@ -370,6 +370,12 @@ kalloc_c="$src/osfmk/kern/kalloc.c"
 #        says 32, a callee is clobbering the loop's callee-saved registers.
 perl -0pi -e 's|(\tfor \(uint16_t i = 0; i < kt_zones; i\+\+\) \{\n\t\tz_name = zalloc_permanent)|\tfor (uint16_t i = 0; i < kt_zones; i++) {\n\t\tif (i >= 32) { panic("fire kt loop overflow: i=%u kt_zones=%u z_size=%lu", i, kt_zones, (unsigned long)z_size); } /* fix-xcode16 */\n\t\tz_name = zalloc_permanent|' "$kalloc_c"
 grep -q 'fire kt loop overflow' "$kalloc_c" || { echo "fix-xcode16: kalloc_type loop check not inserted"; exit 1; }
+#        Root cause found: the garbage 65535/65024/1939/33472 in kt_zones_type is a zone pointer
+#        (0xfffffe00079382c0). Size 32 got 7+25 = 32 zones, but the shared zone needs one more slot
+#        (assert n+1 <= 32, compiled out in RELEASE): kt_zones_for_size[32] overflowed into the tables.
+#        Clamp every size class to 31 zones, taking the excess from the type zones first.
+perl -0pi -e 's|(\t    kt_zones_sig, kt_zones_type, kt_fixed_zones\);\n)|$1\tfor (uint16_t j = 0; j < MAX_K_ZONE(kt_zone_cfg); j++) { /* fix-xcode16: leave room for the shared zone */\n\t\twhile (kt_zones_sig[j] + kt_zones_type[j] + 1 > 32) {\n\t\t\tif (kt_zones_type[j]) { kt_zones_type[j]--; } else { kt_zones_sig[j]--; }\n\t\t}\n\t}\n|' "$kalloc_c"
+grep -q 'leave room for the shared zone' "$kalloc_c" || { echo "fix-xcode16: kalloc_type clamp not inserted"; exit 1; }
 perl -0pi -e 's|(\t\tassert\(n_zones_sig \+ n_zones_type \+ 1 <= 32\);\n)|\t\tif (n_zones_sig + n_zones_type > 32) { /* fix-xcode16: fire diagnostics */\n\t\t\tstatic char df_kt[1536]; int df_o = 0;\n\t\t\tfor (uint16_t j = 0; j < MAX_K_ZONE(kt_zone_cfg) && df_o < (int)sizeof(df_kt) - 40; j++) {\n\t\t\t\tdf_o += snprintf(df_kt + df_o, sizeof(df_kt) - df_o, "%u:%u/%u/%u/%u ", kt_zone_cfg[j], kt_freq_list[j], kt_freq_list_total[j], kt_zones_sig[j], kt_zones_type[j]);\n\t\t\t}\n\t\t\tpanic("fire kt i=%u budget=%u: %s", i, kt_fixed_zones, df_kt);\n\t\t}\n$1|' "$kalloc_c"
 grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic not inserted"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"

@@ -504,6 +504,7 @@ df_rng_kmem_init(crypto_random_ctx_t ctx)
 /* cc_rand_generate()/random_buf() (skywalk_init, ...) go through ccrng_fn: back it with read_random(),
  * i.e. the kernel PRNG installed in prng_random.c. */
 #include <corecrypto/ccrng.h>
+#include <corecrypto/ccsha2.h>
 extern void read_random(void *buffer, u_int numbytes);
 
 static int
@@ -535,6 +536,8 @@ static struct crypto_functions df_crypto_funcs = {
 static void
 df_crypto_register(void)
 {
+	/* SHA256_Init (vm_kernel_addrhash, ...) uses ccsha256_di: the kernel's built-in osfmk/corecrypto one. */
+	df_crypto_funcs.ccsha256_di = ccsha256_di();
 	register_crypto_functions(&df_crypto_funcs);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, df_crypto_register);

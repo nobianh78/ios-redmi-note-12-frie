@@ -507,6 +507,13 @@ perl -0pi -e '
 grep -q 'run without trust caches' "$tc_c" || { echo "fix-xcode16: trust cache init not patched"; exit 1; }
 test "$(grep -c 'trust_cache_rt == NULL) {' "$tc_c")" -eq 5 || { echo "fix-xcode16: expected 4 trust cache NULL guards + load_static"; grep -n 'trust_cache_rt == NULL' "$tc_c"; exit 1; }
 echo "fix-xcode16: trust caches disabled (no AppleImage4/AMFI)"
+
+#        Next panic: undefined "mrs x4, SSBS" in Switch_context. The A55 reports ID_AA64PFR1.SSBS = 1
+#        (PSTATE bit only); the MRS/MSR SSBS register needs FEAT_SSBS2 (= 2), but commpage.c sets
+#        gARM_FEAT_SSBS from >= 1. Require 2, which is what cswitch.s actually uses.
+cp_c="$src/osfmk/arm/commpage/commpage.c"
+perl -pi -e 's|if \(\(pfr1 & ID_AA64PFR1_EL1_SSBS_MASK\) >= ID_AA64PFR1_EL1_SSBS_EN\) \{|if ((pfr1 & ID_AA64PFR1_EL1_SSBS_MASK) >= (2ull << ID_AA64PFR1_EL1_SSBS_OFFSET)) { /* fix-xcode16: MRS SSBS needs FEAT_SSBS2 */|' "$cp_c"
+grep -q 'MRS SSBS needs FEAT_SSBS2' "$cp_c" || { echo "fix-xcode16: SSBS2 check not patched"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

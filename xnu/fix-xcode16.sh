@@ -711,6 +711,11 @@ grep -q 'fire passes a kernel VA' "$iobsd_cpp" || { echo "fix-xcode16: RAMDisk V
 ml_c="$src/bsd/kern/mach_loader.c"
 perl -0pi -e 's#(\t\t\t/\* Check properties of static executables \(disallowed except for development\) \*/\n)\#if !\(DEVELOPMENT \|\| DEBUG\)\n#$1\#if 0 /* fix-xcode16: fire PID 1 is a static Mach-O */\n#' "$ml_c"
 grep -B1 'fire PID 1 is a static Mach-O' "$ml_c" | grep -q 'Check properties of static executables' || { echo "fix-xcode16: static exec patch failed"; grep -n -B2 -A3 'static executables\|fire PID 1' "$ml_c"; exit 1; }
+#        c) mockfs bit-rot (Apple never builds it): kalloc_type/kfree_type get mockfs_fsnode_t, a POINTER
+#           typedef, so the node allocation is 8 bytes; the typed-free check now refuses to compile it.
+mf_c="$src/bsd/miscfs/mockfs/mockfs_fsnode.c"
+perl -pi -e 's/kalloc_type\(mockfs_fsnode_t, /kalloc_type(struct mockfs_fsnode, /; s/kfree_type\(mockfs_fsnode_t, fsnp\)/kfree_type(struct mockfs_fsnode, fsnp)/' "$mf_c"
+test "$(grep -c 'struct mockfs_fsnode, ' "$mf_c")" -eq 2 || { echo "fix-xcode16: mockfs fsnode alloc not fixed"; grep -n 'kalloc_type\|kfree_type' "$mf_c"; exit 1; }
 echo "fix-xcode16: mockfs root from RAMDisk, static PID 1 allowed"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"

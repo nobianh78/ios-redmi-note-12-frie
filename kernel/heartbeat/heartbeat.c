@@ -82,6 +82,52 @@ int fdt_u64(const uint8_t *fdt, const char *node, const char *prop, uint64_t *ou
 
 /* Find the first node whose name contains "framebuffer" and read its reg.
  * shortcut: assumes #address-cells = #size-cells = 2 (true on arm64 MTK DTs); read parent cells if a device differs. */
+/* Print /memreserve/ and every reserved-memory child with a static reg (LK fills these at boot:
+ * ATF, TEE, SSPM, SCP...). Only regions starting below `limit` are shown, to fit the screen.
+ * shortcut: assumes 2+2 cells, like find_fb. */
+int fdt_list_reserved(const uint8_t *fdt, uint64_t limit, void (*show)(const char *, uint64_t, uint64_t)) {
+    if (be32(fdt) != FDT_MAGIC) return 0;
+    int n = 0;
+    for (const uint8_t *m = fdt + be32(fdt + 16);; m += 16) {
+        uint64_t a = (uint64_t)be32(m) << 32 | be32(m + 4), s = (uint64_t)be32(m + 8) << 32 | be32(m + 12);
+        if (!a && !s) break;
+        if (a < limit) { show("memreserve", a, s); n++; }
+    }
+    const uint8_t *p = fdt + be32(fdt + 8);
+    const char *strs = (const char *)fdt + be32(fdt + 12);
+    const uint8_t *end = p + be32(fdt + 36);
+    const char *name = "";
+    int depth = 0, in_rsv = 0;
+    while (p < end) {
+        uint32_t tok = be32(p);
+        p += 4;
+        if (tok == FDT_BEGIN_NODE) {
+            depth++;
+            if (depth == 2 && starts_with((const char *)p, "reserved-memory")) in_rsv = 1;
+            if (in_rsv && depth == 3) name = (const char *)p;
+            while (*p) p++;
+            p = fdt + ((p + 1 - fdt + 3) & ~3u);
+        } else if (tok == FDT_END_NODE) {
+            if (depth == 2) in_rsv = 0;
+            depth--;
+        } else if (tok == FDT_PROP) {
+            uint32_t len = be32(p), nameoff = be32(p + 4);
+            const uint8_t *v = p + 8;
+            if (in_rsv && depth == 3 && str_eq(strs + nameoff, "reg")) {
+                for (uint32_t o = 0; o + 16 <= len; o += 16) {
+                    uint64_t a = (uint64_t)be32(v + o) << 32 | be32(v + o + 4);
+                    uint64_t s = (uint64_t)be32(v + o + 8) << 32 | be32(v + o + 12);
+                    if (a < limit) { show(name, a, s); n++; }
+                }
+            }
+            p = v + ((len + 3) & ~3u);
+        } else if (tok != FDT_NOP) {
+            break;
+        }
+    }
+    return n;
+}
+
 int find_fb(const uint8_t *fdt, uint64_t *base, uint64_t *size) {
     uint32_t len = 0;
     const uint8_t *v = fdt_prop(fdt, "framebuffer", "reg", &len);
@@ -300,6 +346,12 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     return 1;   /* not reached */
 }
 
+static void show_region(const char *name, uint64_t a, uint64_t s) {
+    fbcon_hex(a); fbcon_puts(" +"); fbcon_hex(s); fbcon_putc(' ');
+    for (int i = 0; name[i] && i < 22; i++) fbcon_putc(name[i]);
+    fbcon_putc('\n');
+}
+
 void heartbeat_main(uint64_t fdt_addr) {
     struct layer ovl0[4], ovl2l[4];
     uint32_t en0 = read_ovl(0x1400b000ull, ovl0);
@@ -356,6 +408,13 @@ void heartbeat_main(uint64_t fdt_addr) {
     uint64_t initrd = 0;
     fdt_u64((const uint8_t *)fdt_addr, "chosen", "linux,initrd-start", &initrd);
     fbcon_puts("initrd: "); fbcon_hex(initrd); fbcon_putc('\n');
+#ifdef SHOW_RESERVED
+    /* One-off diagnostic: XNU's zone setup sees its stack change under it; list what LK reserved in
+     * the low 512 MB (XNU gets 0x41004000 + 128 MB) and stop here instead of booting XNU. */
+    fbcon_puts("\nreserved < 0x60000000:\n");
+    if (!fdt_list_reserved((const uint8_t *)fdt_addr, 0x60000000ull, show_region)) fbcon_puts(" none\n");
+    idle_forever(40);
+#endif
     boot_xnu(PAGE16K((uint64_t)_image_end), &video);
     boot_xnu(initrd, &video);
     idle_forever(40);

@@ -301,7 +301,10 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     ba->deviceTreeLength = (uint32_t)p->adt_size;
     /* -v: verbose console. rd=md0: root on the /chosen/memory-map RAMDisk (mockfs serves it as /sbin/launchd). */
     const char *cmd = "-v rd=md0";
-    for (int i = 0; cmd[i] && i < BOOT_LINE_LENGTH - 1; i++) ba->CommandLine[i] = cmd[i];
+    /* Byte stores through volatile: with the MMU off all memory is Device, and clang merged this loop
+     * into an unaligned 8-byte store (CommandLine sits at +0x6c), which faulted and hung the loader. */
+    volatile char *cl = ba->CommandLine;
+    for (int i = 0; cmd[i] && i < BOOT_LINE_LENGTH - 1; i++) cl[i] = cmd[i];
 
     g_phys_base = phys_base; g_virt_base = p->virt_base; g_kernel_size = p->kernel_size;
     uint64_t entry = phys_base + p->entry_offset;

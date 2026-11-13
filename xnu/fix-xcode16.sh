@@ -355,9 +355,9 @@ perl -0pi -e '
   s|\tgicr_write32\(GICR_IGROUPR0, 0x81FFFFFF\);\n|\t/* fix-xcode16: NS EL1 cannot regroup; PPIs stay Group 1 NS */\n|;
   s|"ICC_BPR0_EL1"|"ICC_BPR1_EL1"|;
   s#\tuint32_t gicd_ctlr = gicd_read32\(GICD_CTLR\);\n\tgicd_ctlr \|= GICD_CTLR_ENABLEGRP0;\n\tgicd_write32\(GICD_CTLR, gicd_ctlr\);\n#\t/* fix-xcode16: GICD_CTLR is configured by the secure firmware */\n#;
-  s|"ICC_IGRPEN0_EL1"|"ICC_IGRPEN1_EL1"|;
+  s|\t__builtin_arm_wsr64\("ICC_IGRPEN0_EL1", 1\);\n|\t/* fix-xcode16: leave ICC_IGRPEN1_EL1 off for now. With Group 1 on, the vtimer arrives as an IRQ\n\t * during early boot and the kalloc_type tables on the boot stack got overwritten (different\n\t * garbage every boot). Early boot needs no interrupts; enable once the IRQ path is wired up. */\n|;
 ' "$fiq_c"
-for want in 'NS EL1 cannot regroup' 'ICC_BPR1_EL1' 'configured by the secure firmware' 'ICC_IGRPEN1_EL1'; do
+for want in 'NS EL1 cannot regroup' 'ICC_BPR1_EL1' 'configured by the secure firmware' 'leave ICC_IGRPEN1_EL1 off'; do
 	grep -q "$want" "$fiq_c" || { echo "fix-xcode16: pe_fiq Group 1 patch missing: $want"; exit 1; }
 done
 ! grep -q 'GICD_CTLR_ENABLEGRP0\|ICC_IGRPEN0_EL1\|0x81FFFFFF' "$fiq_c" || { echo "fix-xcode16: pe_fiq still has Group 0 setup"; grep -n 'GRP0\|IGRPEN0\|0x81FF' "$fiq_c"; exit 1; }

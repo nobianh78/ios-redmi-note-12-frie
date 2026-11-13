@@ -538,6 +538,8 @@ df_crypto_register(void)
 {
 	/* SHA256_Init (vm_kernel_addrhash, ...) uses ccsha256_di: the kernel's built-in osfmk/corecrypto one. */
 	df_crypto_funcs.ccsha256_di = ccsha256_di();
+	df_crypto_funcs.ccdigest_init_fn = ccdigest_init;     /* SHA256_Init/Update go through these two; */
+	df_crypto_funcs.ccdigest_update_fn = ccdigest_update; /* SHA256_Final calls di->final directly */
 	register_crypto_functions(&df_crypto_funcs);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, df_crypto_register);

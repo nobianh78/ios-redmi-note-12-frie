@@ -237,13 +237,28 @@ df_mark(int n)
 }
 
 #include "df_font8x8.h"
+/* The framebuffer is first reached through the V=P block (TTBR0). Once a user task runs, TTBR0 holds
+ * that task's tables and the V=P address is gone, so switch to a kernel (TTBR1) mapping once kmem is up. */
+#include <kern/startup.h>
+extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+static volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+static void
+df_fb_map(void)
+{
+	vm_offset_t va = ml_io_map_wcomb(0x7ce6a000, 4320 * 2460);
+	if (va) {
+		df_fbva = (volatile uint32_t *)va;
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, df_fb_map);
+
 /* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
 void df_puts(const char *s, unsigned long caller);
 void
 df_puts(const char *s, unsigned long caller)
 {
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
-	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+	volatile uint32_t *fb = df_fbva;
 	/* 1x 8x8 font, 9px lines: 135 cols x 46 rows, room for the full arm64 register dump */
 	const unsigned pitch = 4320 / 4, top = 2040, bottom = 2460, cols = 1080 / 8;
 	char hex[26] = "caller 0x";
@@ -289,7 +304,7 @@ void df_cons_write(const char *s, int n);
 void
 df_cons_write(const char *s, int n)
 {
-	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, top = 1310, rows = (2030 - 1310) / 9, cols = 1080 / 8;
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	for (int i = 0; i < n; i++) {
@@ -370,7 +385,7 @@ df_irq_stat(uint32_t id)
 			line[n++] = tmp[--t];
 		}
 	}
-	volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, y0 = 1300;
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	for (int fy = 0; fy < 8; fy++) {

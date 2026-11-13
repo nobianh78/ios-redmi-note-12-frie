@@ -491,6 +491,22 @@ df_prng_install(void)
 EOF
 test "$(grep -c 'df_prng_install(); /\* fix-xcode16 \*/' "$prng_c")" -eq 2 || { echo "fix-xcode16: prng install hooks missing"; grep -n df_prng_install "$prng_c"; exit 1; }
 echo "fix-xcode16: installed a minimal kernel PRNG in place of cckprng"
+
+#        Next panic: "image4 interface not available" (kern_trustcache.c, kernel_bootstrap_thread).
+#        img4if/amfi come from the closed AppleImage4/AMFI kexts. Our userland is open source and
+#        unsigned, so run without trust caches: leave the runtime NULL and make every entry point
+#        report "not found / not supported" instead of dereferencing it.
+tc_c="$src/bsd/kern/kern_trustcache.c"
+perl -0pi -e 's|(\tallow_legacy_caches = true;\n#endif\n\n)\t/\* Image4 interface needs to be available \*/\n\tif \(img4if == NULL\) \{\n\t\tpanic\("image4 interface not available"\);\n\t\}\n|$1\t/* fix-xcode16: no AppleImage4/AMFI kexts on fire: run without trust caches */\n\tif (img4if == NULL \|\| amfi == NULL) {\n\t\ttrust_cache_rt = NULL;\n\t\tlck_rw_init(&trust_cache_rt_lock, &trust_cache_lck_grp, 0);\n\t\treturn;\n\t}\n|' "$tc_c"
+perl -0pi -e '
+  s|(\ncheck_trust_cache_runtime_for_uuid\(\n[^{]*\{\n\tkern_return_t ret = KERN_DENIED;\n)|$1\n\tif (trust_cache_rt == NULL) {\n\t\treturn KERN_NOT_SUPPORTED; /* fix-xcode16 */\n\t}\n|;
+  s|(\nload_trust_cache_with_type\(\n[^{]*\{\n)|$1\tif (trust_cache_rt == NULL) {\n\t\treturn KERN_NOT_SUPPORTED; /* fix-xcode16 */\n\t}\n|;
+  s|(\nload_legacy_trust_cache\(\n[^{]*\{\n)|$1\tif (trust_cache_rt == NULL) {\n\t\treturn KERN_NOT_SUPPORTED; /* fix-xcode16 */\n\t}\n|;
+  s|(\nquery_trust_cache\(\n[^{]*\{\n)|$1\tif (trust_cache_rt == NULL) {\n\t\treturn KERN_NOT_FOUND; /* fix-xcode16 */\n\t}\n|;
+' "$tc_c"
+grep -q 'run without trust caches' "$tc_c" || { echo "fix-xcode16: trust cache init not patched"; exit 1; }
+test "$(grep -c 'trust_cache_rt == NULL) {' "$tc_c")" -eq 5 || { echo "fix-xcode16: expected 4 trust cache NULL guards + load_static"; grep -n 'trust_cache_rt == NULL' "$tc_c"; exit 1; }
+echo "fix-xcode16: trust caches disabled (no AppleImage4/AMFI)"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

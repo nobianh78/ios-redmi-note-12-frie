@@ -347,6 +347,19 @@ perl -pi -e '
   elsif (!$e && /^\t__builtin_arm_wsr64\("ICC_IGRPEN0_EL1", 1\);/) { $_ .= "\tdf_mark(18);\n"; $e = 1; }
 ' "$fiq_c"
 test "$(grep -c 'df_mark(1[4-8]);' "$fiq_c")" -eq 5 || { echo "fix-xcode16: expected df_mark 14-18 in pe_fiq.c"; grep -n df_mark "$fiq_c"; exit 1; }
+#        Fire reached mark 16-17 and hung: the Group 0 (FIQ) setup. On MediaTek the secure firmware owns
+#        Group 0; a Non-secure EL1 kernel (Linux on this phone) only uses Group 1. Use Group 1 instead:
+#        no IGROUPR0 write (NS can't regroup), BPR1/IGRPEN1 instead of BPR0/IGRPEN0, leave GICD_CTLR alone.
+perl -0pi -e '
+  s|\tgicr_write32\(GICR_IGROUPR0, 0x81FFFFFF\);\n|\t/* fix-xcode16: NS EL1 cannot regroup; PPIs stay Group 1 NS */\n|;
+  s|"ICC_BPR0_EL1"|"ICC_BPR1_EL1"|;
+  s#\tuint32_t gicd_ctlr = gicd_read32\(GICD_CTLR\);\n\tgicd_ctlr \|= GICD_CTLR_ENABLEGRP0;\n\tgicd_write32\(GICD_CTLR, gicd_ctlr\);\n#\t/* fix-xcode16: GICD_CTLR is configured by the secure firmware */\n#;
+  s|"ICC_IGRPEN0_EL1"|"ICC_IGRPEN1_EL1"|;
+' "$fiq_c"
+for want in 'NS EL1 cannot regroup' 'ICC_BPR1_EL1' 'configured by the secure firmware' 'ICC_IGRPEN1_EL1'; do
+	grep -q "$want" "$fiq_c" || { echo "fix-xcode16: pe_fiq Group 1 patch missing: $want"; exit 1; }
+done
+! grep -q 'GICD_CTLR_ENABLEGRP0\|ICC_IGRPEN0_EL1\|0x81FFFFFF' "$fiq_c" || { echo "fix-xcode16: pe_fiq still has Group 0 setup"; grep -n 'GRP0\|IGRPEN0\|0x81FF' "$fiq_c"; exit 1; }
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
 perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); char df_b[512] = "PANIC: "; if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); }\n|' "$dbg_c"

@@ -667,6 +667,12 @@ perl -0pi -e '
   s|(\npth_proc_hashdelete\(proc_t p\)\n\{\n)|$1\tif (!pthread_functions) {\n\t\treturn; /* fix-xcode16 */\n\t}\n|;
 ' "$pt_c"
 test "$(grep -c 'fix-xcode16' "$pt_c")" -eq 3 || { echo "fix-xcode16: pthread shims not patched"; grep -n -A6 'pthread_init(void)\|pth_proc_hash' "$pt_c"; exit 1; }
+#        Next panic (after dlil/socketinit/domaininit): tcp_tfo_init -> aes_encrypt_key128 -> NULL
+#        g_crypto_funcs->ccaes_cbc_encrypt (corecrypto.kext provides AES). Skip TCP Fast Open without AES.
+#        shortcut: fill AES/SHA into the crypto table (or port corecrypto) before networking matters.
+tcp_c="$src/bsd/netinet/tcp_subr.c"
+perl -0pi -e 's|(static void\ntcp_tfo_init\(void\)\n\{\n\tu_char key\[TCP_FASTOPEN_KEYLEN\];\n\n)|#include <libkern/crypto/register_crypto.h> /* fix-xcode16 */\nextern crypto_functions_t g_crypto_funcs;\n$1\tif (g_crypto_funcs == NULL \|\| g_crypto_funcs->ccaes_cbc_encrypt == NULL) {\n\t\tprintf("fire: no AES (corecrypto.kext absent), TCP Fast Open disabled\\n"); /* fix-xcode16 */\n\t\treturn;\n\t}\n|' "$tcp_c"
+grep -q 'TCP Fast Open disabled' "$tcp_c" || { echo "fix-xcode16: tcp_tfo_init not guarded"; grep -n -A6 '^tcp_tfo_init' "$tcp_c"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

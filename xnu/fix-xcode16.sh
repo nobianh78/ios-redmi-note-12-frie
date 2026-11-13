@@ -514,6 +514,13 @@ echo "fix-xcode16: trust caches disabled (no AppleImage4/AMFI)"
 cp_c="$src/osfmk/arm/commpage/commpage.c"
 perl -pi -e 's|if \(\(pfr1 & ID_AA64PFR1_EL1_SSBS_MASK\) >= ID_AA64PFR1_EL1_SSBS_EN\) \{|if ((pfr1 & ID_AA64PFR1_EL1_SSBS_MASK) >= (2ull << ID_AA64PFR1_EL1_SSBS_OFFSET)) { /* fix-xcode16: MRS SSBS needs FEAT_SSBS2 */|' "$cp_c"
 grep -q 'MRS SSBS needs FEAT_SSBS2' "$cp_c" || { echo "fix-xcode16: SSBS2 check not patched"; exit 1; }
+
+#        IOKit is up. Next panic: "Unable to find driver for this platform: fire" from IOPanicPlatform,
+#        the catch-all that matches when no platform kext does (VMAPPLE uses the closed
+#        AppleVirtualPlatform). Let the catch-all run the generic IOPlatformExpert instead.
+pe_cpp="$src/iokit/Kernel/IOPlatformExpert.cpp"
+perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n\t    platform_name\);\n\n\treturn false;|\t/* fix-xcode16: no platform kext on fire: fall back to the generic IOPlatformExpert */\n\tIOLog("fire: no driver for platform \\"%s\\", using generic IOPlatformExpert\\n", platform_name);\n\treturn IOPlatformExpert::start(provider);|' "$pe_cpp"
+grep -q 'using generic IOPlatformExpert' "$pe_cpp" || { echo "fix-xcode16: IOPanicPlatform not patched"; grep -n -A8 'IOPanicPlatform::start' "$pe_cpp"; exit 1; }
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

@@ -499,7 +499,31 @@ df_rng_kmem_init(crypto_random_ctx_t ctx)
 	*(uint64_t *)ctx = early_random() | 1;   /* xorshift state must be non-zero */
 }
 
+/* cc_rand_generate()/random_buf() (skywalk_init, ...) go through ccrng_fn: back it with read_random(),
+ * i.e. the kernel PRNG installed in prng_random.c. */
+#include <corecrypto/ccrng.h>
+extern void read_random(void *buffer, u_int numbytes);
+
+static int
+df_ccrng_generate(struct ccrng_state *rng __unused, size_t outlen, void *out)
+{
+	read_random(out, (u_int)outlen);
+	return 0;
+}
+
+static struct ccrng_state df_ccrng_state = { .generate = df_ccrng_generate };
+
+static struct ccrng_state *
+df_ccrng(int *error)
+{
+	if (error) {
+		*error = 0;
+	}
+	return &df_ccrng_state;
+}
+
 static struct crypto_functions df_crypto_funcs = {
+	.ccrng_fn = df_ccrng,
 	.random_generate_fn = df_rng_generate,
 	.random_uniform_fn = df_rng_uniform,
 	.random_kmem_ctx_size_fn = df_rng_kmem_ctx_size,

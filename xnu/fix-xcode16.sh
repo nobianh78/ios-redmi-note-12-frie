@@ -366,6 +366,7 @@ df_puts(const char *s, unsigned long caller)
  */
 static unsigned df_con_row, df_con_col;
 static uint64_t df_irq_count;   /* tentative definition; the IRQ status code below owns it */
+void df_usb_putc(char c);       /* USB CDC-ACM console (df_usb.c, appended below) */
 static void
 df_con_glyph(volatile uint32_t *fb, char c, uint32_t color)
 {
@@ -394,6 +395,10 @@ df_cons_write(const char *s, int n)
 	for (int i = 0; i < n; i++) {
 		char c = s[i];
 		df_ps_put(c);
+		if (c == '\n') {
+			df_usb_putc('\r');      /* terminals want CRLF */
+		}
+		df_usb_putc(c);
 		if (c == '\n' || df_con_col == cols) {
 			df_con_col = 0;
 			df_con_row = (df_con_row + 1) % rows;
@@ -508,6 +513,13 @@ df_irq_stat(uint32_t id)
 }
 EOF
 cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
+#        USB CDC-ACM console on USB0 (polled MUSB device): kernel log + /dev/console over a PC COM port.
+cat "$(dirname "$0")/df_usb.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
+grep -q '^df_usb_start(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_usb.c not appended"; exit 1; }
+#        kmputc dropped every 1-byte console write (single digits, tty echo): always pass it on.
+km_c="$src/bsd/dev/arm/km.c"
+perl -0pi -e 's|(\nkmputc\(__unused dev_t dev, char c\)\n\{\n)\tif \(!disableConsoleOutput && initialized\) \{|$1\tif (1) { /* fix-xcode16: fire has no other console, never drop 1-byte writes */|' "$km_c"
+grep -q 'never drop 1-byte writes' "$km_c" || { echo "fix-xcode16: kmputc not patched"; grep -n -A4 '^kmputc' "$km_c"; exit 1; }
 #        Fire now hangs silently after IOKit started (likely waiting for a root device): mirror all
 #        console output to the screen so the kernel log is readable.
 sc_c="$src/osfmk/console/serial_console.c"
@@ -911,6 +923,9 @@ grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC
 #        SVC path, open path, mockfs vnops) are gone: the fixes they led to are the AMFI guards below and the
 #        console_write early return. Kept: the execve result line.
 exec_c="$src/bsd/kern/kern_exec.c"
+#        Start the USB console thread right before PID 1 (threads, IOSleep and the console tty exist).
+perl -0pi -e 's|(\n(\t+)printf\("load_init_program: attempting to load /sbin/launchd\\n"\);\n)|\n${2}{ extern void df_usb_start(void); df_usb_start(); } /* fix-xcode16 */$1|' "$exec_c"
+grep -q 'df_usb_start(); } /\* fix-xcode16' "$exec_c" || { echo "fix-xcode16: df_usb_start hook missing"; exit 1; }
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,

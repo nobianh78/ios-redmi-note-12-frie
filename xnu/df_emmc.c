@@ -120,13 +120,18 @@ extern void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 /* in the kernel image, which the bootloader loaded physically contiguous (checked in dfe_dma_init) */
 static uint8_t dfe_dma_buf[DFE_DMA_BLKS * 512] __attribute__((aligned(4096)));
 static uint32_t dfe_dma_pa;
-static int dfe_dma_ok;
+static int dfe_dma_ok, dfe_dma_rst;         /* rst: reset MSDC before each DMA (set if needed) */
 
 static int
 dfe_dma_read(uint32_t lba, uint32_t n)
 {
 	uint32_t len = n * 512, r1;
 	flush_dcache((vm_offset_t)dfe_dma_buf, len, 0);     /* no dirty line may land on top of DMA data */
+	if (dfe_dma_rst) {
+		dfe_w(E_CFG, dfe_r(E_CFG) | 4);                 /* MSDC_CFG.RST: clears controller + DMA state */
+		for (int i = 0; (dfe_r(E_CFG) & 4) && i < 1000000; i++) {
+		}
+	}
 	dfe_w(E_CFG, dfe_r(E_CFG) & ~(1u << 3));            /* DMA, not PIO */
 	dfe_w(E_FIFOCS, dfe_r(E_FIFOCS) | (1u << 31));
 	for (int i = 0; dfe_r(E_FIFOCS) & (1u << 31); i++) {
@@ -207,27 +212,44 @@ dfe_dma_init(uint32_t bench_lba)
 		return;
 	}
 	dfe_dma_pa = (uint32_t)pa;
-	/* two transfers back to back, both checked against PIO: a DMA that only works once must fail here */
+	/* two transfers back to back, both checked against PIO: a DMA that only works once must fail here.
+	 * The buffer is filled with 0xaa first, so a mismatch tells "DMA wrote nothing" from "stale cache". */
 	int rc = 0;
-	for (uint32_t base = 0; base < 128 && !rc; base += 64) {
+	for (uint32_t base = 0; base < 128; base += 64) {
+		__builtin_memset(dfe_dma_buf, 0xaa, 64 * 512);
 		if ((rc = dfe_dma_read(base, 64))) {
 			printf("emmc: DMA test read at %u failed %d (int %x, dma cfg %x), staying on PIO\n", base, rc,
 			    dfe_r(E_INT), dfe_r(E_DMA_CFG));
 			return;
 		}
-		for (uint32_t b = 0; b < 64; b++) {
+		int bad = -1;
+		for (uint32_t b = 0; b < 64 && bad < 0; b++) {
 			if (df_emmc_read(base + b, dfe_blk)) {
 				printf("emmc: PIO compare read failed at %u\n", base + b);
 				return;
 			}
 			for (int i = 0; i < 512; i++) {
 				if (dfe_blk[i] != dfe_dma_buf[b * 512 + i]) {
-					printf("emmc: DMA/PIO mismatch at LBA %u byte %d, staying on PIO\n", base + b, i);
-					return;
+					bad = (int)b;
+					break;
 				}
 			}
 		}
-	}	/* speed: 16 MB by DMA vs 1 MB by PIO, both from bench_lba */
+		if (bad >= 0) {
+			const uint8_t *d = dfe_dma_buf + bad * 512;
+			printf("emmc: DMA/PIO mismatch at LBA %u (rst %d): dma %02x%02x%02x%02x pio %02x%02x%02x%02x; "
+			    "ctrl %x cfg %x sa %x ca %x len %x\n", base + (uint32_t)bad, dfe_dma_rst, d[0], d[1], d[2], d[3],
+			    dfe_blk[0], dfe_blk[1], dfe_blk[2], dfe_blk[3], dfe_r(E_DMA_CTRL), dfe_r(E_DMA_CFG),
+			    dfe_r(E_DMA_SA), dfe_r(0x94), dfe_r(E_DMA_LEN));
+			if (dfe_dma_rst) {
+				printf("emmc: staying on PIO\n");
+				return;
+			}
+			dfe_dma_rst = 1;                            /* retry the whole test with a reset per DMA */
+			base = (uint32_t)-64;
+		}
+	}
+	rc = 0;	/* speed: 16 MB by DMA vs 1 MB by PIO, both from bench_lba */
 	uint64_t t0 = mach_absolute_time();
 	for (uint32_t i = 0; i < 256 && !rc; i++) {
 		rc = dfe_dma_read(bench_lba + i * DFE_DMA_BLKS, DFE_DMA_BLKS);
@@ -243,8 +265,8 @@ dfe_dma_init(uint32_t bench_lba)
 		return;
 	}
 	dfe_dma_ok = 1;
-	printf("emmc: DMA on (buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
-	    dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
+	printf("emmc: DMA on (rst %d, buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
+	    dfe_dma_rst, dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
 }
 uint64_t df_emmc_sectors;                       /* from the GPT header; /dev/emmc size */
 static uint64_t

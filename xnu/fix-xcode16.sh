@@ -658,6 +658,104 @@ df_ccrng(int *error)
 	return &df_ccrng_state;
 }
 
+/* MD5 (RFC 1321) as a ccdigest_info, for MD5Init/Update/Final (HFS derives the volume UUID with it;
+ * the first HFS+ root mount panicked in MD5Init on the NULL ccmd5_di). Init and update are the
+ * built-in ccdigest_init/ccdigest_update, which keep the ctx as [u64 nbits][state][block][u32 num]
+ * and count 512 bits per compressed block; MD5 only differs in its little-endian length/output. */
+static const uint32_t df_md5_iv[4] = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
+static const uint32_t df_md5_k[64] = {
+	0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+	0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+	0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+	0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+	0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+	0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+	0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+	0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+};
+static const uint8_t df_md5_r[64] = {
+	7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+	5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+	4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+	6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+};
+static void
+df_md5_compress(ccdigest_state_t state, size_t nblocks, const void *data)
+{
+	uint32_t *h = (uint32_t *)state;
+	const uint8_t *p = data;
+	while (nblocks--) {
+		uint32_t m[16], a = h[0], b = h[1], c = h[2], d = h[3];
+		for (int i = 0; i < 16; i++) {
+			m[i] = (uint32_t)p[4 * i] | ((uint32_t)p[4 * i + 1] << 8) | ((uint32_t)p[4 * i + 2] << 16) | ((uint32_t)p[4 * i + 3] << 24);
+		}
+		for (int i = 0; i < 64; i++) {
+			uint32_t f;
+			int g;
+			if (i < 16) {
+				f = (b & c) | (~b & d); g = i;
+			} else if (i < 32) {
+				f = (d & b) | (~d & c); g = (5 * i + 1) & 15;
+			} else if (i < 48) {
+				f = b ^ c ^ d; g = (3 * i + 5) & 15;
+			} else {
+				f = c ^ (b | ~d); g = (7 * i) & 15;
+			}
+			uint32_t t = d;
+			d = c;
+			c = b;
+			uint32_t x = a + f + df_md5_k[i] + m[g];
+			b = b + ((x << df_md5_r[i]) | (x >> (32 - df_md5_r[i])));
+			a = t;
+		}
+		h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+		p += 64;
+	}
+}
+static void
+df_md5_final(const struct ccdigest_info *di, ccdigest_ctx_t ctx, unsigned char *digest)
+{
+	uint8_t tmp[8 + 16 + 64 + 8];               /* nbits, state, block, num (clone, as ccdigest_final_64be) */
+	__builtin_memcpy(tmp, ctx, sizeof(tmp));
+	uint64_t *nbits = (uint64_t *)(void *)tmp;
+	uint32_t *st = (uint32_t *)(void *)(tmp + 8);
+	uint8_t *blk = tmp + 8 + 16;
+	unsigned int *num = (unsigned int *)(void *)(tmp + 8 + 16 + 64);
+	if (*num >= 64) {
+		*num = 0;
+	}
+	*nbits += (uint64_t)*num * 8;
+	blk[(*num)++] = 0x80;
+	if (*num > 56) {
+		while (*num < 64) {
+			blk[(*num)++] = 0;
+		}
+		di->compress((ccdigest_state_t)(void *)st, 1, blk);
+		*num = 0;
+	}
+	while (*num < 56) {
+		blk[(*num)++] = 0;
+	}
+	for (int i = 0; i < 8; i++) {
+		blk[56 + i] = (uint8_t)(*nbits >> (8 * i));
+	}
+	di->compress((ccdigest_state_t)(void *)st, 1, blk);
+	for (int i = 0; i < 16; i++) {
+		digest[i] = (uint8_t)(st[i / 4] >> (8 * (i % 4)));
+	}
+	__builtin_memset(tmp, 0, sizeof(tmp));
+}
+static const struct ccdigest_info df_md5_di = {
+	.output_size = 16,
+	.state_size = 16,
+	.block_size = 64,
+	.oid_size = 0,
+	.oid = NULL,
+	.initial_state = df_md5_iv,
+	.compress = df_md5_compress,
+	.final = df_md5_final,
+};
+
 static struct crypto_functions df_crypto_funcs = {
 	.ccrng_fn = df_ccrng,
 	.random_generate_fn = df_rng_generate,
@@ -673,6 +771,7 @@ df_crypto_register(void)
 	df_crypto_funcs.ccsha256_di = ccsha256_di();
 	df_crypto_funcs.ccdigest_init_fn = ccdigest_init;     /* SHA256_Init/Update go through these two; */
 	df_crypto_funcs.ccdigest_update_fn = ccdigest_update; /* SHA256_Final calls di->final directly */
+	df_crypto_funcs.ccmd5_di = &df_md5_di;
 	register_crypto_functions(&df_crypto_funcs);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, df_crypto_register);

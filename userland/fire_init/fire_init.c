@@ -40,8 +40,18 @@ say(long fd, const char *s)
 	sys3(SYS_write, fd, (long)s, (long)slen(s));
 }
 
+/* LC_UNIXTHREAD entry: the kernel hands over with SP pointing at argc, only 8-byte aligned. AArch64
+ * faults on a misaligned SP (SCTLR_EL1.SA0), so align it before any C code touches the stack
+ * (the first boot died with an SP alignment fault, ESR EC 0x26, in the spin loop below). */
+void cstart(void);
+__asm__(".globl _start\n"
+    "_start:\n"
+    "\tmov x9, sp\n"
+    "\tand sp, x9, #~15\n"
+    "\tb _cstart\n");
+
 void
-start(void)
+cstart(void)
 {
 	long fd = sys3(SYS_open, (long)"/dev/console", O_WRONLY | O_NOCTTY, 0);
 

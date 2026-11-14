@@ -588,6 +588,12 @@ void
 cstart(void)
 {
 	con = sys3(SYS_open, "/dev/console", O_RDWR | O_NOCTTY, 0);
+	/* stdin/stdout/stderr for the programs started by `run` (dup2 = syscall 90) */
+	for (long fd = 0; fd < 3; fd++) {
+		if (fd != con) {
+			sys3(90, con, fd, 0);
+		}
+	}
 	out("\n**********************************************\n");
 	out("*  DarwinFire: hello from userland (PID 1)   *\n");
 	out("*  fire_sh v2 on open-source XNU, MT6768     *\n");

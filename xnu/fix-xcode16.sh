@@ -442,6 +442,17 @@ df_irq_stat(uint32_t id)
 		if (id == 27 || id == 30) {
 			df_irq_timer++;
 		}
+		if ((df_irq_count & 63) == 1) {   /* pstore heartbeat: no printf from IRQ context */
+			char b[24];
+			int t = 0;
+			uint64_t v = df_irq_count;
+			df_ps_puts("fire irq n=");
+			do { b[t++] = (char)('0' + v % 10); v /= 10; } while (v);
+			while (t) {
+				df_ps_put(b[--t]);
+			}
+			df_ps_puts(id == 27 || id == 30 ? " timer\n" : " other\n");
+		}
 	}
 	int32_t stval = (int32_t)(uint32_t)tval;   /* signed: negative = already expired */
 	uint64_t val[6] = { df_irq_count, df_irq_last, df_irq_timer, df_irq_done, ctl,
@@ -905,7 +916,13 @@ done
 test "$(cat "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp" | grep -c 'fix-xcode16: no AMFI')" -eq 4 || { echo "fix-xcode16: expected 4 amfi NULL guards"; grep -n 'amfi->OSEntitlements' "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp"; exit 1; }
 #        With AMFI guarded, execve returns and PID 1 runs: its first syscall (open "/dev/console", x16=5) never
 #        returns. Trace the BSD syscall dispatch (first 40) and the steps of open1/vn_open_auth.
+#        Next log: "fire el0#1 ... x16=5" but no "fire sys 5 >": stuck between the SVC exception and the
+#        syscall dispatch. Trace handle_svc and the start of unix_syscall (first 10 SVCs).
+perl -0pi -e 's|(\n\tthread->iotier_override = THROTTLE_LEVEL_NONE;[^\n]*before handling SVC[^\n]*\n)|$1\tstatic int df_svc; int df_svc_on = df_svc++ < 10; /* fix-xcode16 */\n\tif (df_svc_on) { printf("fire svc %d a\\n", trap_no); }\n|; s|(\n\tmach_kauth_cred_thread_update\(\);\n)|$1\tif (df_svc_on) { printf("fire svc b (cred)\\n"); }\n|; s|(\n\t\tunix_syscall\(state, thread, p\);\n)|\n\t\tif (df_svc_on) { printf("fire svc c (unix_syscall)\\n"); }$1|' "$sleh_c"
+test "$(grep -c 'fire svc ' "$sleh_c")" -eq 3 || { echo "fix-xcode16: handle_svc trace not inserted"; grep -n 'fire svc' "$sleh_c"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
+perl -0pi -e 's|(\n\tcode = arm_get_syscall_number\(state\);\n)|$1\tstatic int df_us; int df_us_on = df_us++ < 10; /* fix-xcode16 */\n\tif (df_us_on) { printf("fire us %d a\\n", code); }\n|; s|(\n\tsyscode = \(code < nsysent\) \? code : SYS_invalid;\n)|\n\tif (df_us_on) { printf("fire us b\\n"); }$1|; s|(\n\tuthread->uu_flag \|= UT_NOTCANCELPT;\n)|\n\tif (df_us_on) { printf("fire us c (args ok)\\n"); }$1|' "$sc_arm"
+test "$(grep -c 'fire us ' "$sc_arm")" -eq 3 || { echo "fix-xcode16: unix_syscall start trace not inserted"; grep -n 'fire us' "$sc_arm"; exit 1; }
 perl -0pi -e 's|(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)|\n\tstatic int df_sc; int df_sc_on = df_sc++ < 40; /* fix-xcode16 */\n\tif (df_sc_on) { printf("fire sys %d pid %d >\\n", code, pid); }$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n|' "$sc_arm"
 grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 vfsop_c="$src/bsd/vfs/vfs_syscalls.c"

@@ -367,6 +367,19 @@ static void show_region(const char *name, uint64_t a, uint64_t s) {
     fbcon_putc('\n');
 }
 
+/* XNU writes its console into the Android ramoops console zone (0x4d09f000, header "DBGC" + start +
+ * size, then the text, which XNU starts with this marker). Android overwrites it on its next boot.
+ * If the marker is still there, XNU already ran since Android last booted: this is an A/B retry after
+ * the watchdog reset. Skip XNU and reset at once, so the retries run out in seconds and the first
+ * run's log survives for Android to read. */
+static int xnu_log_pending(void) {
+    static const char mark[] = "==== DarwinFire XNU console";
+    volatile const uint8_t *z = (volatile const uint8_t *)0x4d09f000ull;
+    if (*(volatile const uint32_t *)z != 0x43474244u) return 0;
+    for (int i = 0; mark[i]; i++) if (z[12 + i] != (uint8_t)mark[i]) return 0;
+    return 1;
+}
+
 void heartbeat_main(uint64_t fdt_addr) {
     struct layer ovl0[4], ovl2l[4];
     uint32_t en0 = read_ovl(0x1400b000ull, ovl0);
@@ -385,6 +398,11 @@ void heartbeat_main(uint64_t fdt_addr) {
     fbcon_puts("\n\n");   /* skip rows hidden by the rounded corners / camera notch */
     fbcon_puts("DarwinFire heartbeat\n");
     fbcon_puts("Redmi 12 fire / MT6768\n\n");
+    if (xnu_log_pending()) {
+        fbcon_puts("XNU log already in pstore:\nretry -> reset now\n");
+        *(volatile uint32_t *)0x10007014ull = 0x1209;   /* TOPRGU WDT_SWRST key: immediate reset */
+        for (;;) __asm__ volatile("wfe");
+    }
     fbcon_puts("EL: "); fbcon_dec(current_el()); fbcon_putc('\n');
     fbcon_puts("FDT: "); fbcon_hex(fdt_addr); fbcon_putc('\n');
     fbcon_puts("FDT fb: ");

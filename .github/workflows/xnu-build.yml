@@ -174,6 +174,18 @@ jobs:
               node tools/macho_static.js "out/init/$n" "out/bin/$n"
             fi
           done
+          # dash (P4 B): build with the host toolchain (same arch), relink its objects with firelibc.
+          # Non-fatal until firelibc covers everything; the undefined list drives what to add next.
+          (
+            set +e
+            curl -fsSL http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz | tar xz -C out
+            cd out/dash-0.5.12
+            ./configure -q CFLAGS="-O2 -fno-stack-protector -D_FORTIFY_SOURCE=0 -mcpu=cortex-a55" >/dev/null && make -s -j4 >/dev/null 2>&1
+            objs=$(ls src/*.o | grep -v -e mkinit -e mksyntax -e mknodes -e mksignames)
+            ld -arch arm64 -platform_version macos 11.0 11.0 -static -e _start -o ../bin/dash $objs ../init/firelibc.o 2>&1 \
+              | grep -o '"_[A-Za-z0-9_$]*"' | sort -u | tr '\n' ' ' | sed 's/^/dash undefined: /'
+            echo
+          ) || true
           ls -la out/bin
           hdiutil create -size 16m -fs HFS+ -volname fire -layout NONE -type UDIF -o out/fire_root.dmg
           hdiutil attach out/fire_root.dmg -mountpoint /tmp/fireroot -nobrowse -owners on

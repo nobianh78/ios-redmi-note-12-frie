@@ -105,6 +105,7 @@ df_emmc_read(uint32_t lba, void *buf)
 }
 
 static uint8_t dfe_blk[512];
+uint64_t df_emmc_sectors;                       /* from the GPT header; /dev/emmc size */
 static uint64_t
 dfe_le(const uint8_t *p, int n)
 {
@@ -138,6 +139,7 @@ df_emmc_probe(void)
 	uint32_t n = (uint32_t)dfe_le(dfe_blk + 80, 4), esz = (uint32_t)dfe_le(dfe_blk + 84, 4);
 	printf("emmc: GPT ok, %u entries of %u bytes at LBA %llu, disk %llu MB\n", n, esz, ent_lba,
 	    (last + 1) >> 11);
+	df_emmc_sectors = last + 1;
 	if (esz != 128 || n > 128) {
 		return;
 	}

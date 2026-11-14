@@ -21,6 +21,10 @@
 #undef QUOTA
 #undef NAMEDSTREAMS
 #undef FIFO
+#undef CONFIG_PV_TICKET         /* locks.h: __startup_func lck_init_pv() exists only inside xnu */
+#ifndef __startup_func
+#define __startup_func          /* kern/startup.h is XNU_KERNEL_PRIVATE-only */
+#endif
 
 #define HFS_COMPRESSION 1
 #define FIFO 1

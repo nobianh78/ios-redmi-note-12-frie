@@ -50,9 +50,9 @@ dfe_wait(uint32_t bits, int ms)
 	return 0;
 }
 
-/* resp: 1 = R1. data: 0 none, 1 single-block read. Read-only by construction: bit13 (write) never set. */
+/* R1 response. Read-only by construction: bit13 (write) is never set by any caller. */
 static int
-dfe_cmd(unsigned op, uint32_t arg, int data, uint32_t *resp)
+dfe_cmd(unsigned op, uint32_t arg, uint32_t extra, uint32_t *resp)
 {
 	for (int i = 0; dfe_r(E_SDC_STS) & 3; i++) {
 		if (i > 1000000) {
@@ -61,7 +61,7 @@ dfe_cmd(unsigned op, uint32_t arg, int data, uint32_t *resp)
 	}
 	dfe_w(E_INT, dfe_r(E_INT));
 	dfe_w(E_SDC_ARG, arg);
-	dfe_w(E_SDC_CMD, op | (1u << 7) | (data ? (1u << 11) | (512u << 16) : 0));
+	dfe_w(E_SDC_CMD, op | (1u << 7) | extra);       /* extra: data type, block size, auto-CMD12 */
 	uint32_t v = dfe_wait(EI_CMDRDY | EI_CMDTMO | EI_RSPCRCERR, 100);
 	dfe_w(E_INT, EI_CMDRDY | EI_CMDTMO | EI_RSPCRCERR);
 	if (!(v & EI_CMDRDY)) {
@@ -78,6 +78,7 @@ int
 df_emmc_read(uint32_t lba, void *buf)
 {
 	uint32_t *p = (uint32_t *)buf, r1;
+	dfe_w(E_CFG, dfe_r(E_CFG) | (1u << 3));             /* PIO (the DMA path clears it) */
 	dfe_w(E_FIFOCS, dfe_r(E_FIFOCS) | (1u << 31));
 	for (int i = 0; dfe_r(E_FIFOCS) & (1u << 31); i++) {
 		if (i > 1000000) {
@@ -85,7 +86,7 @@ df_emmc_read(uint32_t lba, void *buf)
 		}
 	}
 	dfe_w(E_BLK_NUM, 1);
-	int rc = dfe_cmd(17, lba, 1, &r1);
+	int rc = dfe_cmd(17, lba, (1u << 11) | (512u << 16), &r1);
 	if (rc) {
 		return rc;
 	}
@@ -105,6 +106,142 @@ df_emmc_read(uint32_t lba, void *buf)
 }
 
 static uint8_t dfe_blk[512];
+
+/* ---- basic-mode DMA (one physically contiguous buffer, no descriptors): CMD18 + auto CMD12 ---- */
+#define E_DMA_SA        0x90
+#define E_DMA_CTRL      0x98    /* bit0 start, bit1 stop, bit8 descriptor mode, bit10 last buf, 14:12 burst */
+#define E_DMA_CFG       0x9c    /* bit0 active */
+#define E_DMA_LEN       0xa8
+#define DFE_DMA_BLKS    128     /* 64 KB per command */
+extern void flush_dcache(vm_offset_t addr, unsigned count, int phys);
+extern uint64_t kvtophys(vm_offset_t va);
+extern uint64_t mach_absolute_time(void);
+extern void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
+/* in the kernel image, which the bootloader loaded physically contiguous (checked in dfe_dma_init) */
+static uint8_t dfe_dma_buf[DFE_DMA_BLKS * 512] __attribute__((aligned(4096)));
+static uint32_t dfe_dma_pa;
+static int dfe_dma_ok;
+
+static int
+dfe_dma_read(uint32_t lba, uint32_t n)
+{
+	uint32_t len = n * 512, r1;
+	flush_dcache((vm_offset_t)dfe_dma_buf, len, 0);     /* no dirty line may land on top of DMA data */
+	dfe_w(E_CFG, dfe_r(E_CFG) & ~(1u << 3));            /* DMA, not PIO */
+	dfe_w(E_FIFOCS, dfe_r(E_FIFOCS) | (1u << 31));
+	for (int i = 0; dfe_r(E_FIFOCS) & (1u << 31); i++) {
+		if (i > 1000000) {
+			return -1;
+		}
+	}
+	dfe_w(E_DMA_SA, dfe_dma_pa);
+	dfe_w(E_DMA_LEN, len);
+	dfe_w(E_DMA_CTRL, (dfe_r(E_DMA_CTRL) & ~((1u << 8) | (7u << 12))) | (1u << 10) | (6u << 12)); /* basic, 64 B bursts */
+	dfe_w(E_BLK_NUM, n);
+	int rc = dfe_cmd(n > 1 ? 18 : 17, lba, (n > 1 ? (2u << 11) | (1u << 28) : (1u << 11)) | (512u << 16), &r1);
+	if (rc == 0) {
+		dfe_w(E_DMA_CTRL, dfe_r(E_DMA_CTRL) | 1);       /* start */
+		uint32_t v = dfe_wait(EI_XFER_COMPL | EI_DATTMO | EI_DATCRCERR, 2000);
+		rc = (v & EI_XFER_COMPL) ? 0 : (v ? -8 : -7);
+		for (int i = 0; (dfe_r(E_DMA_CFG) & 1) && i < 1000000; i++) {
+		}
+	}
+	dfe_w(E_DMA_CTRL, dfe_r(E_DMA_CTRL) | 2);           /* stop (no-op when already idle) */
+	for (int i = 0; (dfe_r(E_DMA_CFG) & 1) && i < 1000000; i++) {
+	}
+	dfe_w(E_INT, dfe_r(E_INT));
+	flush_dcache((vm_offset_t)dfe_dma_buf, len, 0);     /* drop lines fetched before the DMA finished */
+	return rc;
+}
+
+/* Read n blocks into buf: DMA in 64 KB commands when the self-test passed, else PIO block by block. */
+int df_emmc_readn(uint32_t lba, uint32_t n, void *buf);
+int
+df_emmc_readn(uint32_t lba, uint32_t n, void *buf)
+{
+	uint8_t *out = (uint8_t *)buf;
+	while (n) {
+		uint32_t k = n < DFE_DMA_BLKS ? n : DFE_DMA_BLKS;
+		int rc;
+		if (dfe_dma_ok) {
+			if ((rc = dfe_dma_read(lba, k))) {
+				return rc;
+			}
+			__builtin_memcpy(out, dfe_dma_buf, k * 512);
+		} else {
+			for (uint32_t i = 0; i < k; i++) {
+				if ((rc = df_emmc_read(lba + i, out + i * 512))) {
+					return rc;
+				}
+			}
+		}
+		lba += k;
+		n -= k;
+		out += k * 512;
+	}
+	return 0;
+}
+
+static uint64_t
+dfe_ms_since(uint64_t t0)
+{
+	uint64_t ns;
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+	return ns / 1000000;
+}
+
+/* Enable DMA only if the buffer is contiguous below 4 GB and DMA data matches PIO data. */
+static void
+dfe_dma_init(uint32_t bench_lba)
+{
+	uint64_t pa = kvtophys((vm_offset_t)dfe_dma_buf);
+	for (unsigned off = 4096; off < sizeof(dfe_dma_buf); off += 4096) {
+		if (kvtophys((vm_offset_t)dfe_dma_buf + off) != pa + off) {
+			printf("emmc: DMA buffer not contiguous, staying on PIO\n");
+			return;
+		}
+	}
+	if (!pa || pa + sizeof(dfe_dma_buf) > 0x100000000ULL) {
+		printf("emmc: DMA buffer at %llx, not below 4 GB, staying on PIO\n", pa);
+		return;
+	}
+	dfe_dma_pa = (uint32_t)pa;
+	int rc = dfe_dma_read(0, 64);                       /* LBA 0-63: protective MBR, GPT, entries */
+	if (rc) {
+		printf("emmc: DMA test read failed %d (int %x, dma cfg %x), staying on PIO\n", rc, dfe_r(E_INT), dfe_r(E_DMA_CFG));
+		return;
+	}
+	for (uint32_t b = 0; b < 64; b++) {
+		if (df_emmc_read(b, dfe_blk)) {
+			printf("emmc: PIO compare read failed at %u\n", b);
+			return;
+		}
+		for (int i = 0; i < 512; i++) {
+			if (dfe_blk[i] != dfe_dma_buf[b * 512 + i]) {
+				printf("emmc: DMA/PIO mismatch at LBA %u byte %d, staying on PIO\n", b, i);
+				return;
+			}
+		}
+	}
+	/* speed: 16 MB by DMA vs 1 MB by PIO, both from bench_lba */
+	uint64_t t0 = mach_absolute_time();
+	for (uint32_t i = 0; i < 256 && !rc; i++) {
+		rc = dfe_dma_read(bench_lba + i * DFE_DMA_BLKS, DFE_DMA_BLKS);
+	}
+	uint64_t dma_ms = dfe_ms_since(t0);
+	t0 = mach_absolute_time();
+	for (uint32_t i = 0; i < 2048 && !rc; i++) {
+		rc = df_emmc_read(bench_lba + i, dfe_blk);
+	}
+	uint64_t pio_ms = dfe_ms_since(t0);
+	if (rc) {
+		printf("emmc: DMA benchmark failed %d, staying on PIO\n", rc);
+		return;
+	}
+	dfe_dma_ok = 1;
+	printf("emmc: DMA on (buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
+	    dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
+}
 uint64_t df_emmc_sectors;                       /* from the GPT header; /dev/emmc size */
 static uint64_t
 dfe_le(const uint8_t *p, int n)
@@ -140,6 +277,7 @@ df_emmc_probe(void)
 	printf("emmc: GPT ok, %u entries of %u bytes at LBA %llu, disk %llu MB\n", n, esz, ent_lba,
 	    (last + 1) >> 11);
 	df_emmc_sectors = last + 1;
+	dfe_dma_init(2153744);                              /* benchmark on boot_b (read-only) */
 	if (esz != 128 || n > 128) {
 		return;
 	}

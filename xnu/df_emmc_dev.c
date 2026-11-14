@@ -8,12 +8,12 @@
  */
 #include <kern/locks.h>
 
-extern int df_emmc_read(uint32_t lba, void *buf);
+extern int df_emmc_readn(uint32_t lba, uint32_t n, void *buf);
 extern uint64_t df_emmc_sectors;
 
 static LCK_GRP_DECLARE(dfe_lck_grp, "df_emmc");
-static LCK_MTX_DECLARE(dfe_mtx, &dfe_lck_grp);  /* one PIO command at a time */
-static uint8_t dfe_dev_blk[512];
+static LCK_MTX_DECLARE(dfe_mtx, &dfe_lck_grp);  /* one controller command at a time */
+static uint8_t dfe_dev_buf[64 * 1024];
 
 static int
 dfe_dev_open(dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
@@ -39,17 +39,27 @@ dfe_dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		if (off < 0 || lba >= df_emmc_sectors) {
 			break;                          /* EOF */
 		}
-		int rc = df_emmc_read((uint32_t)lba, dfe_dev_blk);
+		/* the blocks covering this request, up to 64 KB, clipped at the end of the disk */
+		int in = (int)(off & 511);
+		uint64_t want = (uint64_t)in + (uint64_t)uio_resid(uio);
+		uint32_t blks = (uint32_t)((want + 511) >> 9);
+		if (blks > sizeof(dfe_dev_buf) / 512) {
+			blks = sizeof(dfe_dev_buf) / 512;
+		}
+		if (lba + blks > df_emmc_sectors) {
+			blks = (uint32_t)(df_emmc_sectors - lba);
+		}
+		int rc = df_emmc_readn((uint32_t)lba, blks, dfe_dev_buf);
 		if (rc) {
-			printf("emmc: read LBA %llu failed %d\n", lba, rc);
+			printf("emmc: read LBA %llu (+%u) failed %d\n", lba, blks, rc);
 			err = EIO;
 			break;
 		}
-		int in = (int)(off & 511), n = 512 - in;
+		int n = (int)blks * 512 - in;
 		if (n > uio_resid(uio)) {
 			n = (int)uio_resid(uio);
 		}
-		err = uiomove((caddr_t)dfe_dev_blk + in, n, uio);
+		err = uiomove((caddr_t)dfe_dev_buf + in, n, uio);
 	}
 	lck_mtx_unlock(&dfe_mtx);
 	return err;

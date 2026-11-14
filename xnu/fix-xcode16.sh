@@ -245,6 +245,7 @@ volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
 /* MT6768 TOPRGU watchdog, armed (31 s) by the heartbeat loader; mapped next to the framebuffer in
  * initialize_screen(). Restarted on every console line: silence for 31 s (hang, panic) reboots. */
 volatile uint32_t *df_wdt;
+int df_irq_verbose;   /* >0: log each of the next N IRQs to pstore (set when PID 1 first traps) */
 
 /* Console log into the Android ramoops console zone, so the next Android boot (slot a, after the
  * watchdog reset) shows it as /sys/fs/pstore/console-ramoops-0. Stock params (/sys/module/ramoops):
@@ -442,7 +443,8 @@ df_irq_stat(uint32_t id)
 		if (id == 27 || id == 30) {
 			df_irq_timer++;
 		}
-		if ((df_irq_count & 63) == 1) {   /* pstore heartbeat: no printf from IRQ context */
+		extern int df_irq_verbose;
+		if ((df_irq_count & 63) == 1 || (df_irq_verbose > 0 && df_irq_verbose-- > 0)) {   /* pstore: no printf in IRQ */
 			char b[24];
 			int t = 0;
 			uint64_t v = df_irq_count;
@@ -451,7 +453,15 @@ df_irq_stat(uint32_t id)
 			while (t) {
 				df_ps_put(b[--t]);
 			}
-			df_ps_puts(id == 27 || id == 30 ? " timer\n" : " other\n");
+			df_ps_puts(id == 27 || id == 30 ? " timer\n" : " other id=");
+			if (!(id == 27 || id == 30)) {
+				v = id;
+				do { b[t++] = (char)('0' + v % 10); v /= 10; } while (v);
+				while (t) {
+					df_ps_put(b[--t]);
+				}
+				df_ps_put('\n');
+			}
 		}
 	}
 	int32_t stval = (int32_t)(uint32_t)tval;   /* signed: negative = already expired */
@@ -891,7 +901,9 @@ perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 #        Fire hangs (no panic) after "attempting to load /sbin/launchd". Log the first 40 exceptions taken
 #        from EL0 (SVC = syscalls of PID 1, aborts = its faults) and what execve returned.
-perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && df_n < 40) { df_n++; printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); } } /* fix-xcode16 */\n|' "$sleh_c"
+perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && df_n < 40) { df_n++; printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu daif=0x%llx spsr=0x%llx\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16], (unsigned long long)__builtin_arm_rsr64("DAIF"), (unsigned long long)get_saved_state_cpsr(state)); if (df_n == 1) { extern int df_irq_verbose; df_irq_verbose = 60; } } } /* fix-xcode16 */\n|' "$sleh_c"
+perl -0pi -e 's|(\n\tif \(SPSR_INTERRUPTS_ENABLED\(get_saved_state_cpsr\(state\)\)\) \{\n)(\t\tml_set_interrupts_enabled\(TRUE\);\n)(\t\}\n\n\tswitch \(class\) \{\n\tcase ESR_EC_SVC_64:)|$1\t\tstatic int df_ie; int df_ie_on = is_user && df_ie++ < 10; /* fix-xcode16 */\n\t\tif (df_ie_on) { printf("fire sync irq-on >\\n"); }\n$2\t\tif (df_ie_on) { printf("fire sync irq-on <\\n"); }\n$3|' "$sleh_c"
+grep -q 'fire sync irq-on <' "$sleh_c" || { echo "fix-xcode16: irq-enable trace not inserted"; grep -n -B3 -A3 'Inherit the interrupt masks' "$sleh_c"; exit 1; }
 grep -q 'fire el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
 exec_c="$src/bsd/kern/kern_exec.c"
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"

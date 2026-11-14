@@ -924,7 +924,9 @@ grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC
 #        console_write early return. Kept: the execve result line.
 exec_c="$src/bsd/kern/kern_exec.c"
 #        Start the USB console thread right before PID 1 (threads, IOSleep and the console tty exist).
-perl -0pi -e 's|(\n(\t+)printf\("load_init_program: attempting to load /sbin/launchd\\n"\);\n)|\n${2}{ extern void df_usb_start(void); df_usb_start(); } /* fix-xcode16 */$1|' "$exec_c"
+#        At the top of load_init_program: "attempting to load /sbin/launchd" is printed from three
+#        branches, and the first attempt hooked one that does not run.
+perl -0pi -e 's|(\nload_init_program\(proc_t p\)\n\{\n)|$1\t{ extern void df_usb_start(void); df_usb_start(); } /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'df_usb_start(); } /\* fix-xcode16' "$exec_c" || { echo "fix-xcode16: df_usb_start hook missing"; exit 1; }
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }

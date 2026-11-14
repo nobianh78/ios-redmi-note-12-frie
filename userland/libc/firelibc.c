@@ -812,6 +812,10 @@ strsignal(int s)
 	case 11: return "Segmentation fault";
 	case 13: return "Broken pipe";
 	case 15: return "Terminated";
+	case 17: return "Suspended (signal)";
+	case 18: return "Suspended";
+	case 21: return "Stopped (tty input)";
+	case 22: return "Stopped (tty output)";
 	default: return "Signal";
 	}
 }

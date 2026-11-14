@@ -988,8 +988,12 @@ cp "$(dirname "$0")/df_hfs_config.h" "$(dirname "$0")/df_aks_stub.h" "$(dirname 
 #        iBoot_Stage_2_version). Only HFS gets it (df_hfs_config.h includes it); debug.h skips its
 #        include when the macros are already there.
 cp "$(dirname "$0")/TargetConditionals.h" "$hfs_dst/core/df_targetconditionals.h"
-perl -0pi -e 's|(#ifndef XNU_KERNEL_PRIVATE\n)#include <TargetConditionals.h>\n|$1#ifndef __TARGETCONDITIONALS__ /* fix-xcode16: in-kernel HFS brings its own */\n#include <TargetConditionals.h>\n#endif\n|' "$src/osfmk/kern/debug.h"
-grep -q 'in-kernel HFS brings its own' "$src/osfmk/kern/debug.h" || { echo "fix-xcode16: debug.h TargetConditionals guard missing"; exit 1; }
+#        Every kernel header that includes it (debug.h, net/kpi_interface.h, ...) skips the include when
+#        the macros are already defined, which only our in-kernel kext code does.
+for h in $(grep -rl --include='*.h' '^#[[:space:]]*include <TargetConditionals.h>' "$src/osfmk" "$src/bsd" "$src/libkern" "$src/iokit" "$src/pexpert" "$src/security" 2>/dev/null); do
+	perl -pi -e 's|^(#\s*include <TargetConditionals.h>)\s*$|#ifndef __TARGETCONDITIONALS__ /* fix-xcode16: in-kernel kext code brings its own */\n$1\n#endif\n|' "$h"
+done
+grep -q 'in-kernel kext code brings its own' "$src/osfmk/kern/debug.h" || { echo "fix-xcode16: debug.h TargetConditionals guard missing"; exit 1; }
 perl -pi -e 's|#include <AppleKeyStore/AppleKeyStoreFSServices.h>|#include "df_aks_stub.h" /* fix-xcode16 */|' "$hfs_dst/core/hfs_iokit.h"
 grep -q 'df_aks_stub.h' "$hfs_dst/core/hfs_iokit.h" || { echo "fix-xcode16: AKS header not replaced"; exit 1; }
 #        HFS.kext and HFSEncodings.kext each define the hfs_allocated counter; linked into one kernel they

@@ -573,6 +573,7 @@ static const char script[] =
     "ls /bin\n"
     "run /bin/hello one two\n"
     "run /bin/ltest\n"
+    "run /bin/dash /etc/test.sh\n"
     "sleep 2\n"
     "uptime\n"
     "echo script done\n";

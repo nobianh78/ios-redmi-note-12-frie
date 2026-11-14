@@ -11,6 +11,7 @@ char **environ;
 /* ---- crt0: LC_UNIXTHREAD enters with sp -> argc, argv..., 0, envp..., 0, apple..., 0 ----
  * sp is only 8-byte aligned there; AArch64 faults on a misaligned sp, so align before any C. */
 int main(int argc, char **argv, char **envp);
+static void ctype_init(void);
 void __fire_start(long *sp) __attribute__((noreturn));
 __asm__(".globl _start\n"
     "_start:\n"
@@ -24,6 +25,7 @@ __fire_start(long *sp)
 	char **argv = (char **)(sp + 1);
 	char **envp = argv + argc + 1;
 	environ = envp;
+	ctype_init();
 	exit(main(argc, argv, envp));
 }
 
@@ -437,23 +439,33 @@ void (*signal(int sig, void (*h)(int)))(int)
 int kill(pid_t pid, int sig) { return (int)S3(37, pid, sig, 1 /* posix */); }
 
 /* ---- formatted output (buffered per call, so lines are not split into 1-byte writes) ---- */
+/* Sink is either an fd (buffered) or a caller buffer of cap bytes (snprintf semantics). */
 struct obuf {
 	int fd;
 	int len;
 	int total;
+	char *dst;
+	size_t cap;
 	char b[512];
 };
 static void
 ob_flush(struct obuf *o)
 {
-	if (o->len) {
+	if (o->len && !o->dst) {
 		write(o->fd, o->b, (size_t)o->len);
-		o->len = 0;
 	}
+	o->len = 0;
 }
 static void
 ob_put(struct obuf *o, char c)
 {
+	if (o->dst) {
+		if ((size_t)o->total + 1 < o->cap) {
+			o->dst[o->total] = c;
+		}
+		o->total++;
+		return;
+	}
 	if (o->len == (int)sizeof(o->b)) {
 		ob_flush(o);
 	}
@@ -461,80 +473,562 @@ ob_put(struct obuf *o, char c)
 	o->total++;
 }
 static void
-ob_num(struct obuf *o, unsigned long v, unsigned base, int neg)
+ob_field(struct obuf *o, const char *s, int n, int width, int left, char pad)
 {
-	char t[24];
-	int i = 0;
-	do {
-		t[i++] = "0123456789abcdef"[v % base];
-		v /= base;
-	} while (v);
-	if (neg) {
-		ob_put(o, '-');
+	for (; !left && width > n; width--) {
+		ob_put(o, pad);
 	}
-	while (i) {
-		ob_put(o, t[--i]);
+	for (int i = 0; i < n; i++) {
+		ob_put(o, s[i]);
+	}
+	for (; left && width > n; width--) {
+		ob_put(o, ' ');
 	}
 }
 static int
-vfmt(int fd, const char *f, va_list ap)
+vfmt(struct obuf *o, const char *f, va_list ap)
 {
-	struct obuf o = { fd, 0, 0, { 0 } };
 	for (; *f; f++) {
 		if (*f != '%') {
-			ob_put(&o, *f);
+			ob_put(o, *f);
 			continue;
 		}
-		int lng = 0;
-		f++;
-		while (*f == 'l') {
-			lng = 1;
+		int left = 0, zero = 0, width = 0, prec = -1, lng = 0, plus = 0;
+		for (f++;; f++) {
+			if (*f == '-') {
+				left = 1;
+			} else if (*f == '0') {
+				zero = 1;
+			} else if (*f == '+') {
+				plus = 1;
+			} else if (*f != ' ' && *f != '#') {
+				break;
+			}
+		}
+		if (*f == '*') {
+			width = va_arg(ap, int);
+			if (width < 0) {
+				left = 1;
+				width = -width;
+			}
 			f++;
 		}
+		while (*f >= '0' && *f <= '9') {
+			width = width * 10 + *f++ - '0';
+		}
+		if (*f == '.') {
+			prec = 0;
+			if (*++f == '*') {
+				prec = va_arg(ap, int);
+				f++;
+			}
+			while (*f >= '0' && *f <= '9') {
+				prec = prec * 10 + *f++ - '0';
+			}
+		}
+		for (; *f == 'l' || *f == 'h' || *f == 'z' || *f == 'j' || *f == 'q' || *f == 't'; f++) {
+			lng |= *f != 'h';
+		}
+		char t[24];
+		int i = sizeof(t);
 		switch (*f) {
 		case 's': {
 			const char *s = va_arg(ap, const char *);
-			for (s = s ? s : "(null)"; *s; s++) {
-				ob_put(&o, *s);
+			s = s ? s : "(null)";
+			int n = 0;
+			while (s[n] && (prec < 0 || n < prec)) {
+				n++;
 			}
+			ob_field(o, s, n, width, left, ' ');
 			break;
 		}
 		case 'c':
-			ob_put(&o, (char)va_arg(ap, int));
+			t[0] = (char)va_arg(ap, int);
+			ob_field(o, t, 1, width, left, ' ');
 			break;
-		case 'd': {
-			long v = lng ? va_arg(ap, long) : va_arg(ap, int);
-			ob_num(&o, (unsigned long)(v < 0 ? -v : v), 10, v < 0);
+		case 'd':
+		case 'i':
+		case 'u':
+		case 'x':
+		case 'X':
+		case 'o':
+		case 'p': {
+			unsigned long v;
+			int neg = 0;
+			unsigned base = *f == 'o' ? 8 : (*f == 'x' || *f == 'X' || *f == 'p') ? 16 : 10;
+			if (*f == 'p') {
+				v = (unsigned long)va_arg(ap, void *);
+			} else if (*f == 'd' || *f == 'i') {
+				long s = lng ? va_arg(ap, long) : va_arg(ap, int);
+				neg = s < 0;
+				v = neg ? -(unsigned long)s : (unsigned long)s;
+			} else {
+				v = lng ? va_arg(ap, unsigned long) : va_arg(ap, unsigned);
+			}
+			const char *dig = *f == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
+			do {
+				t[--i] = dig[v % base];
+				v /= base;
+			} while (v);
+			while (prec > 0 && (int)sizeof(t) - i < prec && i > 2) {
+				t[--i] = '0';
+			}
+			if (*f == 'p') {
+				t[--i] = 'x';
+				t[--i] = '0';
+			}
+			if (neg || plus) {
+				if (zero && !left) {
+					ob_put(o, neg ? '-' : '+');
+					width--;
+				} else {
+					t[--i] = neg ? '-' : '+';
+				}
+			}
+			ob_field(o, t + i, (int)sizeof(t) - i, width, left, zero && !left ? '0' : ' ');
 			break;
 		}
-		case 'u':
-			ob_num(&o, lng ? va_arg(ap, unsigned long) : va_arg(ap, unsigned), 10, 0);
-			break;
-		case 'x':
-			ob_num(&o, lng ? va_arg(ap, unsigned long) : va_arg(ap, unsigned), 16, 0);
-			break;
-		case 'p':
-			ob_put(&o, '0');
-			ob_put(&o, 'x');
-			ob_num(&o, (unsigned long)va_arg(ap, void *), 16, 0);
-			break;
 		case '%':
-			ob_put(&o, '%');
+			ob_put(o, '%');
 			break;
 		default:
-			ob_put(&o, '%');
-			ob_put(&o, *f);
+			ob_put(o, '%');
+			ob_put(o, *f);
 		}
 	}
-	ob_flush(&o);
-	return o.total;
+	ob_flush(o);
+	if (o->dst && o->cap) {
+		o->dst[(size_t)o->total < o->cap ? (size_t)o->total : o->cap - 1] = 0;
+	}
+	return o->total;
+}
+static int
+vfd(int fd, const char *f, va_list ap)
+{
+	struct obuf o;
+	o.fd = fd;
+	o.len = o.total = 0;
+	o.dst = NULL;
+	o.cap = 0;
+	return vfmt(&o, f, ap);
+}
+int
+vsnprintf(char *buf, size_t cap, const char *f, va_list ap)
+{
+	struct obuf o;
+	o.fd = -1;
+	o.len = o.total = 0;
+	o.dst = buf;
+	o.cap = cap;
+	return vfmt(&o, f, ap);
+}
+int
+snprintf(char *buf, size_t cap, const char *f, ...)
+{
+	va_list ap;
+	va_start(ap, f);
+	int r = vsnprintf(buf, cap, f, ap);
+	va_end(ap);
+	return r;
+}
+
+/* ---- the rest of what dash needs ---- */
+int *__error(void) { return &errno; }
+/* stack probe: pages are mapped on demand by the kernel anyway, nothing to touch */
+__asm__(".globl ___chkstk_darwin\n___chkstk_darwin:\n\tret\n");
+
+/* ctype: the SDK macros read _DefaultRuneLocale.__runetype[c] (ASCII only here) */
+struct {
+	char magic[8], enc[32];
+	void *sget, *sput;
+	int invalid;
+	unsigned runetype[256];
+	int maplower[256], mapupper[256];
+	char rest[256];
+} _DefaultRuneLocale;
+static void
+ctype_init(void)
+{
+	for (int c = 0; c < 256; c++) {
+		unsigned t = 0;
+		int up = c >= 'A' && c <= 'Z', lo = c >= 'a' && c <= 'z', dg = c >= '0' && c <= '9';
+		if (up) {
+			t |= 0x100 | 0x8000; /* A U */
+		}
+		if (lo) {
+			t |= 0x100 | 0x1000; /* A L */
+		}
+		if (dg) {
+			t |= 0x400 | (unsigned)(c - '0'); /* D + digit value */
+		}
+		if (dg || ((c | 32) >= 'a' && (c | 32) <= 'f')) {
+			t |= 0x10000; /* X */
+		}
+		if (c < 32 || c == 127) {
+			t |= 0x200; /* C */
+		}
+		if (c == ' ' || (c >= 9 && c <= 13)) {
+			t |= 0x4000; /* S */
+		}
+		if (c == ' ' || c == '\t') {
+			t |= 0x20000; /* B */
+		}
+		if (c >= 32 && c < 127) {
+			t |= 0x40000; /* R */
+			if (c != ' ') {
+				t |= 0x800; /* G */
+				if (!up && !lo && !dg) {
+					t |= 0x2000; /* P */
+				}
+			}
+		}
+		_DefaultRuneLocale.runetype[c] = t;
+		_DefaultRuneLocale.maplower[c] = up ? c + 32 : c;
+		_DefaultRuneLocale.mapupper[c] = lo ? c - 32 : c;
+	}
+}
+unsigned long __maskrune(int c, unsigned long f) { return (c >= 0 && c < 256) ? _DefaultRuneLocale.runetype[c] & f : 0; }
+int __toupper(int c) { return (c >= 0 && c < 256) ? _DefaultRuneLocale.mapupper[c] : c; }
+int __tolower(int c) { return (c >= 0 && c < 256) ? _DefaultRuneLocale.maplower[c] : c; }
+
+void
+abort(void)
+{
+	kill(getpid(), 6);
+	_exit(134);
+}
+int raise(int sig) { return kill(getpid(), sig); }
+int killpg(pid_t pg, int sig) { return kill(-pg, sig); }
+unsigned getuid(void) { return (unsigned)S0(24); }
+unsigned geteuid(void) { return (unsigned)S0(25); }
+unsigned getgid(void) { return (unsigned)S0(47); }
+unsigned getegid(void) { return (unsigned)S0(43); }
+pid_t getpgrp(void) { return (pid_t)S0(81); }
+int setpgid(pid_t p, pid_t g) { return (int)S2(82, p, g); }
+mode_t umask(mode_t m) { return (mode_t)S1(60, m); }
+int getrlimit(int r, void *l) { return (int)S2(194, r, l); }
+int setrlimit(int r, const void *l) { return (int)S2(195, r, l); }
+int
+fcntl(int fd, int cmd, ...)
+{
+	va_list ap;
+	va_start(ap, cmd);
+	long a = va_arg(ap, long);
+	va_end(ap);
+	return (int)S3(92, fd, cmd, a);
+}
+int ioctl(int fd, unsigned long req, void *a) { return (int)S3(54, fd, req, a); }
+int
+isatty(int fd)
+{
+	char t[72]; /* struct termios */
+	return ioctl(fd, 0x40487413 /* TIOCGETA */, t) == 0;
+}
+pid_t
+tcgetpgrp(int fd)
+{
+	int g;
+	return ioctl(fd, 0x40047477 /* TIOCGPGRP */, &g) < 0 ? -1 : g;
+}
+int tcsetpgrp(int fd, pid_t g) { return ioctl(fd, 0x80047476 /* TIOCSPGRP */, &g); }
+/* pipe(2) returns the read end in x0 and the write end in x1 */
+int
+pipe(int fd[2])
+{
+	long x1 = 0;
+	long r = sc(42, 0, 0, 0, 0, 0, 0, &x1);
+	if (r < 0) {
+		return -1;
+	}
+	fd[0] = (int)r;
+	fd[1] = (int)x1;
+	return 0;
+}
+pid_t vfork(void) { return fork(); } /* shortcut: real fork, costs a copy; fine for a shell this size */
+pid_t wait3(int *st, int opt, void *ru) { return (pid_t)S4(7, -1, st, opt, ru); }
+/* no getcwd syscall on Darwin: ask the kernel for the path of "." */
+char *
+getcwd(char *buf, size_t n)
+{
+	char p[1024];
+	int fd = open(".", O_RDONLY);
+	if (fd < 0) {
+		return NULL;
+	}
+	int r = fcntl(fd, 50 /* F_GETPATH */, p);
+	close(fd);
+	if (r < 0) {
+		return NULL;
+	}
+	if (strlen(p) + 1 > n) {
+		errno = 34;
+		return NULL;
+	}
+	return strcpy(buf, p);
+}
+void *getpwnam(const char *n) { (void)n; return NULL; } /* no user database yet */
+
+typedef unsigned sigset_t;
+struct sigaction {
+	void (*handler)(int);
+	sigset_t mask;
+	int flags;
+};
+int
+sigaction(int sig, const struct sigaction *a, struct sigaction *old)
+{
+	struct {
+		void *handler, *tramp;
+		sigset_t mask;
+		int flags;
+	} k;
+	if (a) {
+		k.handler = (void *)a->handler;
+		k.tramp = (void *)sigtramp;
+		k.mask = a->mask;
+		k.flags = a->flags;
+	}
+	return (int)S3(46, sig, a ? &k : NULL, old);
+}
+int sigprocmask(int how, const sigset_t *s, sigset_t *o) { return (int)S3(48, how, s, o); }
+int
+sigsetmask(int m)
+{
+	sigset_t s = (sigset_t)m, o = 0;
+	sigprocmask(3 /* SIG_SETMASK */, &s, &o);
+	return (int)o;
+}
+int sigsuspend(const sigset_t *s) { return (int)S1(111, *s); }
+const char *
+strsignal(int s)
+{
+	switch (s) {
+	case 1: return "Hangup";
+	case 2: return "Interrupt";
+	case 3: return "Quit";
+	case 6: return "Abort trap";
+	case 9: return "Killed";
+	case 10: return "Bus error";
+	case 11: return "Segmentation fault";
+	case 13: return "Broken pipe";
+	case 15: return "Terminated";
+	default: return "Signal";
+	}
+}
+
+void *
+memchr(const void *s, int c, size_t n)
+{
+	const unsigned char *p = s;
+	for (; n; n--, p++) {
+		if (*p == (unsigned char)c) {
+			return (void *)p;
+		}
+	}
+	return NULL;
+}
+void
+memset_pattern16(void *d, const void *pat, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		((unsigned char *)d)[i] = ((const unsigned char *)pat)[i & 15];
+	}
+}
+char *
+stpcpy(char *d, const char *s)
+{
+	while ((*d = *s++)) {
+		d++;
+	}
+	return d;
+}
+char *
+stpncpy(char *d, const char *s, size_t n)
+{
+	size_t i = 0;
+	for (; i < n && s[i]; i++) {
+		d[i] = s[i];
+	}
+	char *r = d + i;
+	for (; i < n; i++) {
+		d[i] = 0;
+	}
+	return r;
+}
+int
+strcasecmp(const char *a, const char *b)
+{
+	for (;; a++, b++) {
+		int x = __tolower((unsigned char)*a), y = __tolower((unsigned char)*b);
+		if (x != y || !x) {
+			return x - y;
+		}
+	}
+}
+size_t
+strspn(const char *s, const char *set)
+{
+	size_t n = 0;
+	while (s[n] && strchr(set, s[n])) {
+		n++;
+	}
+	return n;
+}
+size_t
+strcspn(const char *s, const char *set)
+{
+	size_t n = 0;
+	while (s[n] && !strchr(set, s[n])) {
+		n++;
+	}
+	return n;
+}
+char *
+strpbrk(const char *s, const char *set)
+{
+	s += strcspn(s, set);
+	return *s ? (char *)s : NULL;
+}
+char *
+strstr(const char *h, const char *n)
+{
+	size_t l = strlen(n);
+	for (; *h; h++) {
+		if (!strncmp(h, n, l)) {
+			return (char *)h;
+		}
+	}
+	return l ? NULL : (char *)h;
+}
+char *
+strtok(char *s, const char *sep)
+{
+	static char *last;
+	if (!s) {
+		s = last;
+	}
+	if (!s) {
+		return NULL;
+	}
+	s += strspn(s, sep);
+	if (!*s) {
+		return last = NULL;
+	}
+	char *e = s + strcspn(s, sep);
+	last = *e ? e + 1 : NULL;
+	*e = 0;
+	return s;
+}
+long strtoimax(const char *s, char **e, int b) { return strtol(s, e, b); }
+
+void *
+bsearch(const void *key, const void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *))
+{
+	size_t lo = 0, hi = n;
+	while (lo < hi) {
+		size_t mid = (lo + hi) / 2;
+		const char *p = (const char *)base + mid * sz;
+		int c = cmp(key, p);
+		if (!c) {
+			return (void *)p;
+		}
+		if (c < 0) {
+			hi = mid;
+		} else {
+			lo = mid + 1;
+		}
+	}
+	return NULL;
+}
+/* shortcut: insertion sort, O(n^2); dash only sorts short lists (e.g. `set` output) */
+void
+qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *))
+{
+	char *b = base, tmp[256];
+	if (sz > sizeof(tmp)) {
+		return;
+	}
+	for (size_t i = 1; i < n; i++) {
+		memcpy(tmp, b + i * sz, sz);
+		size_t j = i;
+		for (; j && cmp(b + (j - 1) * sz, tmp) > 0; j--) {
+			memcpy(b + j * sz, b + (j - 1) * sz, sz);
+		}
+		memcpy(b + j * sz, tmp, sz);
+	}
+}
+
+/* fnmatch: * ? [set] [!set] and backslash escapes; FNM_NOESCAPE=1, FNM_PERIOD=4 */
+int
+fnmatch(const char *p, const char *s, int flags)
+{
+	const char *s0 = s;
+	for (;; p++, s++) {
+		switch (*p) {
+		case 0:
+			return *s ? 1 : 0;
+		case '?':
+			if (!*s || ((flags & 4) && *s == '.' && s == s0)) {
+				return 1;
+			}
+			break;
+		case '*':
+			if ((flags & 4) && *s == '.' && s == s0) {
+				return 1;
+			}
+			while (*p == '*') {
+				p++;
+			}
+			for (;; s++) {
+				if (!fnmatch(p, s, flags & ~4)) {
+					return 0;
+				}
+				if (!*s) {
+					return 1;
+				}
+			}
+		case '[': {
+			if (!*s) {
+				return 1;
+			}
+			const char *q = p + 1;
+			int neg = *q == '!' || *q == '^', ok = 0;
+			q += neg;
+			do {
+				char a = *q, z = a;
+				if (!a) {
+					return 1;
+				}
+				if (q[1] == '-' && q[2] && q[2] != ']') {
+					z = q[2];
+					q += 2;
+				}
+				ok |= *s >= a && *s <= z;
+			} while (*++q != ']');
+			if (ok == neg) {
+				return 1;
+			}
+			p = q;
+			break;
+		}
+		case '\\':
+			if (!(flags & 1) && p[1]) {
+				p++;
+			}
+			/* fallthrough */
+		default:
+			if (*p != *s) {
+				return 1;
+			}
+		}
+	}
 }
 int
 printf(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	int r = vfmt(1, fmt, ap);
+	int r = vfd(1, fmt, ap);
 	va_end(ap);
 	return r;
 }
@@ -543,7 +1037,7 @@ dprintf(int fd, const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
-	int r = vfmt(fd, fmt, ap);
+	int r = vfd(fd, fmt, ap);
 	va_end(ap);
 	return r;
 }

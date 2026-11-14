@@ -883,6 +883,8 @@ cp "$hfs_tmp"/core/*.c "$hfs_tmp"/core/*.h "$hfs_dst/core/"
 cp "$hfs_tmp"/hfs_encodings/hfs_encodings.c "$hfs_tmp"/hfs_encodings/hfs_encodinghint.c "$hfs_tmp"/hfs_encodings/*.h "$hfs_dst/hfs_encodings/"
 rm -rf "$hfs_tmp"
 cp "$(dirname "$0")/df_hfs_config.h" "$(dirname "$0")/df_aks_stub.h" "$(dirname "$0")/df_hfs_glue.c" "$hfs_dst/core/"
+#        Kernel headers include <TargetConditionals.h> on the kext path; the xnu tree has none.
+[ -f "$src/EXTERNAL_HEADERS/TargetConditionals.h" ] || cp "$(dirname "$0")/TargetConditionals.h" "$src/EXTERNAL_HEADERS/"
 perl -pi -e 's|#include <AppleKeyStore/AppleKeyStoreFSServices.h>|#include "df_aks_stub.h" /* fix-xcode16 */|' "$hfs_dst/core/hfs_iokit.h"
 grep -q 'df_aks_stub.h' "$hfs_dst/core/hfs_iokit.h" || { echo "fix-xcode16: AKS header not replaced"; exit 1; }
 for f in "$hfs_dst"/core/*.c; do perl -0pi -e 's|^|#include "df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done

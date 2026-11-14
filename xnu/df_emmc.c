@@ -113,7 +113,16 @@ static uint8_t dfe_blk[512];
 #define E_DMA_CFG       0x9c    /* bit0 active */
 #define E_DMA_LEN       0xa8
 #define DFE_DMA_BLKS    128     /* 64 KB per command */
-extern void flush_dcache(vm_offset_t addr, unsigned count, int phys);
+/* XNU is built "coherent IO" for VMAPPLE, where flush_dcache() is only a DSB; MT6768 DMA is NOT
+ * coherent, so clean+invalidate the buffer by VA ourselves (Cortex-A55/A75 lines are 64 bytes). */
+static void
+dfe_civac(const void *p, uint32_t len)
+{
+	for (uintptr_t a = (uintptr_t)p & ~63ul; a < (uintptr_t)p + len; a += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" : : : "memory");
+}
 extern uint64_t kvtophys(vm_offset_t va);
 extern uint64_t mach_absolute_time(void);
 extern void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
@@ -126,7 +135,7 @@ static int
 dfe_dma_read(uint32_t lba, uint32_t n)
 {
 	uint32_t len = n * 512, r1;
-	flush_dcache((vm_offset_t)dfe_dma_buf, len, 0);     /* no dirty line may land on top of DMA data */
+	dfe_civac(dfe_dma_buf, len);                        /* no dirty line may land on top of DMA data */
 	if (dfe_dma_rst) {
 		dfe_w(E_CFG, dfe_r(E_CFG) | 4);                 /* MSDC_CFG.RST: clears controller + DMA state */
 		for (int i = 0; (dfe_r(E_CFG) & 4) && i < 1000000; i++) {
@@ -156,7 +165,7 @@ dfe_dma_read(uint32_t lba, uint32_t n)
 	for (int i = 0; (dfe_r(E_DMA_CFG) & 1) && i < 1000000; i++) {
 	}
 	dfe_w(E_INT, dfe_r(E_INT));
-	flush_dcache((vm_offset_t)dfe_dma_buf, len, 0);     /* drop lines fetched before the DMA finished */
+	dfe_civac(dfe_dma_buf, len);                        /* drop lines fetched before the DMA finished */
 	return rc;
 }
 

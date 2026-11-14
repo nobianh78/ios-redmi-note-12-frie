@@ -1022,25 +1022,28 @@ git -c advice.detachedHead=false clone -q --depth 1 --branch "$pth_tag" https://
 	|| { echo "fix-xcode16: libpthread clone failed"; exit 1; }
 pth_dst="$src/bsd/pthread/df_libpthread"
 rm -rf "$pth_dst"
-mkdir -p "$pth_dst/kern" "$pth_dst/hdr"
+mkdir -p "$pth_dst/kern" "$pth_dst/hdr" "$pth_dst/hdrp"
 cp "$pth_tmp"/kern/*.c "$pth_tmp"/kern/*.h "$pth_dst/kern/"
-cp -R "$pth_tmp"/include/. "$pth_dst/hdr/"
-cp -R "$pth_tmp"/private/. "$pth_dst/hdr/"
-find "$pth_dst/hdr" -type f ! -name '*.h' -delete
+cp -R "$pth_tmp"/include/. "$pth_dst/hdr/"       # public headers
+cp -R "$pth_tmp"/private/. "$pth_dst/hdrp/"      # private ones; private pthread/qos.h #include_next's the public one
+find "$pth_dst/hdr" "$pth_dst/hdrp" -type f ! -name '*.h' -delete
 rm -rf "$pth_tmp"
 cp "$(dirname "$0")/df_pth_config.h" "$pth_dst/kern/"
 cp "$(dirname "$0")/TargetConditionals.h" "$pth_dst/kern/df_targetconditionals.h"
 (
 	cd "$pth_dst"
-	# kern sources: "kern/X" -> "X", "pthread/X" -> "../hdr/pthread/X", TargetConditionals -> our copy
+	# kern sources: "kern/X" -> "X", "pthread/X" -> private copy if any else public, TargetConditionals -> ours
 	for f in kern/*.c kern/*.h; do
-		perl -pi -e 's|#include "kern/|#include "|; s|#include "pthread/|#include "../hdr/pthread/|; s|#include <TargetConditionals.h>|#include "df_targetconditionals.h"|' "$f"
+		perl -pi -e 's|#include "kern/|#include "|; s{#include "(pthread/[^"]+)"}{ -f "hdrp/$1" ? "#include \"../hdrp/$1\"" : "#include \"../hdr/$1\"" }e; s|#include <TargetConditionals.h>|#include "df_targetconditionals.h"|' "$f"
 	done
-	# angle includes of headers we ship -> relative paths, in kern/ and hdr/
-	for f in kern/*.c kern/*.h $(find hdr -name '*.h'); do
-		rel="$(dirname "$f" | sed -e 's|[^/][^/]*|..|g')/hdr"
-		perl -pi -e 'BEGIN { $rel = shift @ARGV } s{#(\s*)include <((?:pthread|sys)/[^>]+)>}{ -f "hdr/$2" ? "#$1include \"$rel/$2\"" : $& }ge' "$rel" "$f"
+	# angle includes and include_next of headers we ship -> relative paths: public copy first (that is what
+	# the private qos.h's #include_next means), else the private one
+	for f in kern/*.c kern/*.h $(find hdr hdrp -name '*.h'); do
+		up="$(dirname "$f" | sed -e 's|[^/][^/]*|..|g')"
+		perl -pi -e 'BEGIN { $up = shift @ARGV } s{#(\s*)include(?:_next)? <((?:pthread|sys)/[^>]+)>}{ -f "hdr/$2" ? "#$1include \"$up/hdr/$2\"" : -f "hdrp/$2" ? "#$1include \"$up/hdrp/$2\"" : $& }ge' "$up" "$f"
 	done
+	# kern_trace.h: the kext-view prototype takes vm_offset_t
+	perl -pi -e 's|vm_kernel_unslide_or_perm_external\(ptr, &unslid_ptr\)|vm_kernel_unslide_or_perm_external((vm_offset_t)ptr, \&unslid_ptr) /* fix-xcode16 */|' kern/kern_trace.h
 	# pthread.kext defines current_uthread(); the kernel has its own
 	perl -pi -e 's/\bcurrent_uthread\b/df_pth_current_uthread/g' kern/*.c kern/*.h
 	for f in kern/*.c; do perl -0pi -e 's|^|#include "df_pth_config.h" /* fix-xcode16 */\n|' "$f"; done

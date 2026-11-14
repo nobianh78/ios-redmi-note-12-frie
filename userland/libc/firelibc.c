@@ -920,6 +920,63 @@ strtok(char *s, const char *sep)
 	return s;
 }
 long strtoimax(const char *s, char **e, int b) { return strtol(s, e, b); }
+unsigned long strtoumax(const char *s, char **e, int b) { return (unsigned long)strtol(s, e, b); }
+double
+strtod(const char *s, char **end)
+{
+	const char *p = s;
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	int neg = *p == '-';
+	p += *p == '-' || *p == '+';
+	double v = 0, scale = 1;
+	const char *d0 = p;
+	for (; *p >= '0' && *p <= '9'; p++) {
+		v = v * 10 + (*p - '0');
+	}
+	if (*p == '.') {
+		for (p++; *p >= '0' && *p <= '9'; p++) {
+			v = v * 10 + (*p - '0');
+			scale *= 10;
+		}
+	}
+	if (p == d0) {
+		p = s; /* no digits: nothing converted */
+	} else if (*p == 'e' || *p == 'E') {
+		char *q;
+		long x = strtol(p + 1, &q, 10);
+		if (q != p + 1) {
+			p = q;
+			for (; x > 0; x--) {
+				v *= 10;
+			}
+			for (; x < 0; x++) {
+				scale *= 10;
+			}
+		}
+	}
+	if (end) {
+		*end = (char *)p;
+	}
+	v /= scale;
+	return neg ? -v : v;
+}
+int faccessat(int fd, const char *path, int mode, int flag) { return (int)S4(466, fd, path, mode, flag); }
+long sysconf(int name) { return name == 3 /* _SC_CLK_TCK */ ? 100 : -1; }
+/* no times syscall on Darwin: user/sys time from getrusage, in 1/100 s */
+unsigned long
+times(unsigned long t[4])
+{
+	long ru[18], rc[18]; /* struct rusage: utime, stime timevals first */
+	S2(117, 0, ru);
+	S2(117, -1, rc);
+	t[0] = (unsigned long)(ru[0] * 100 + (int)ru[1] / 10000);
+	t[1] = (unsigned long)(ru[2] * 100 + (int)ru[3] / 10000);
+	t[2] = (unsigned long)(rc[0] * 100 + (int)rc[1] / 10000);
+	t[3] = (unsigned long)(rc[2] * 100 + (int)rc[3] / 10000);
+	return 0;
+}
 
 void *
 bsearch(const void *key, const void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *))

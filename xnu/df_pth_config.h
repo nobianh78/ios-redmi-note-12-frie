@@ -18,5 +18,5 @@
 #define __PTHREAD_EXPOSE_INTERNALS__ 1
 /* pointer <-> integer conversions (trace args, user_addr_t) were warnings for the compilers this
  * release was built with; Xcode 16's clang makes them errors. */
-#pragma clang diagnostic warning "-Wint-conversion"
+#pragma clang diagnostic ignored "-Wint-conversion"   /* a warning still fails under xnu's -Werror */
 #endif

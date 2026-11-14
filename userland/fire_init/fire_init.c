@@ -453,9 +453,11 @@ cmd_run(char *arg)
 		return;
 	}
 	if (x1) {               /* child */
-		/* own session with the console as controlling tty, so dash gets job control (Ctrl-C, &, fg) */
-		sys3(147 /* setsid */, 0, 0, 0);
-		sys3(54 /* ioctl */, 0, 0x20007461 /* TIOCSCTTY */, 0);
+		/* own process group in the foreground of the console (PID 1 holds the session; a child
+		 * session leader exiting would hang up the console under PID 1) -> dash gets job control */
+		sys3(82 /* setpgid */, 0, 0, 0);
+		int pg = (int)sys3(20 /* getpid */, 0, 0, 0);
+		sys3(54 /* ioctl */, 0, 0x80047476 /* TIOCSPGRP */, (long)&pg);
 		long r = sys3(SYS_execve, argv[0], argv, envp);
 		out("run: execve error ");
 		outi(-r);
@@ -466,6 +468,8 @@ cmd_run(char *arg)
 	long pid = x0;
 	int status = 0;
 	long w = sys6(SYS_wait4, pid, (long)&status, 0, 0, 0, 0);
+	int me = 1; /* take the console foreground back (PID 1's group) */
+	sys3(54 /* ioctl */, 0, 0x80047476 /* TIOCSPGRP */, (long)&me);
 	out("run: pid ");
 	outi(pid);
 	out(" exited, wait4 ");
@@ -596,7 +600,11 @@ __asm__(".globl _start\n"
 void
 cstart(void)
 {
+	sys3(147 /* setsid */, 0, 0, 0);
+	long ign[3] = { 1 /* SIG_IGN */, 0, 0 }; /* kernel __sigaction: handler, tramp, mask+flags */
+	sys3(46 /* sigaction */, 22 /* SIGTTOU */, (long)ign, 0);
 	con = sys3(SYS_open, "/dev/console", O_RDWR | O_NOCTTY, 0);
+	sys3(54 /* ioctl */, con, 0x20007461 /* TIOCSCTTY */, 0); /* console = our controlling tty */
 	/* stdin/stdout/stderr for the programs started by `run` (dup2 = syscall 90) */
 	for (long fd = 0; fd < 3; fd++) {
 		if (fd != con) {

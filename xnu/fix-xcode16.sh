@@ -896,6 +896,13 @@ test "$(grep -c 'printf("fire mx ' "$exec_c")" -ge 15 || { echo "fix-xcode16: __
 #        Next pstore log ended at "fire mx error = process_signature": trace inside process_signature too.
 perl -pi -e '$in = 1 if /^process_signature\(proc_t p, struct image_params \*imgp\)/; if ($in && /^\t+(proc_lock|proc_csflags_update|vm_map_switch_protect|vm_map_cs_enforcement_set|if \(\(error = mac_proc_check_launch_constraints|kr = task_get_task_access_port|kr = __EXEC_WAITING_ON_TASKGATED_CODE_SIGNATURE_UPCALL__|csb = ubc_cs_blob_get|error = proc_process_signature|kr = thread_process_signature|psignal_with_reason|psignal_vfork_with_reason|ipc_port_release_send|return error)\b/) { $fn = $1; $fn =~ s/[^\w ]//g; ($ind) = /^(\t+)/; $_ = "${ind}printf(\"fire ps $fn\\n\");\n$_"; } $in = 0 if $in && /^\}/;' "$exec_c"
 test "$(grep -c 'printf("fire ps ' "$exec_c")" -ge 10 || { echo "fix-xcode16: process_signature trace too short"; grep -n 'fire ps' "$exec_c"; exit 1; }
+#        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
+#        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,
+#        no process has entitlements: answer "not entitled" instead of calling through NULL.
+for f in "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp"; do
+	perl -pi -e 's/kern_return_t ret = amfi->OSEntitlements\./kern_return_t ret = (amfi == NULL) ? KERN_FAILURE : \/* fix-xcode16: no AMFI *\/ amfi->OSEntitlements./' "$f"
+done
+test "$(cat "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp" | grep -c 'fix-xcode16: no AMFI')" -eq 4 || { echo "fix-xcode16: expected 4 amfi NULL guards"; grep -n 'amfi->OSEntitlements' "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp"; exit 1; }
 mfvn_c="$src/bsd/miscfs/mockfs/mockfs_vnops.c"
 perl -0pi -e 's/(\nmockfs_(\w+)\(struct vnop_\w+_args \* ap\)\n\{\n)/$1\t{ static int df_n; if (df_n++ < 30) { printf("fire mockfs_$2\\n"); } } \/* fix-xcode16 *\/\n/g' "$mfvn_c"
 test "$(grep -c 'printf("fire mockfs_' "$mfvn_c")" -eq 7 || { echo "fix-xcode16: expected 7 mockfs vnop logs"; grep -n 'fire mockfs_' "$mfvn_c"; exit 1; }

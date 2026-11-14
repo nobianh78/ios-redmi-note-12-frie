@@ -22,6 +22,8 @@
 #define SYS_getdirentries64 344
 #define SYS_fsync           95
 #define SYS_mkdir           136
+#define SYS_mount           167
+#define MNT_UPDATE          0x00010000
 #define O_WRONLY    0x0001
 #define O_CREAT     0x0200
 #define O_TRUNC     0x0400
@@ -352,7 +354,7 @@ static void
 help(void)
 {
 	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | cat FILE | write FILE TEXT |"
-	    " mkdir DIR | sleep N | help | exit [N]\n");
+	    " mkdir DIR | remount | sleep N | help | exit [N]\n");
 }
 
 /* Run one command line (modified in place). */
@@ -399,6 +401,12 @@ run(char *line)
 		cmd_cat(arg);
 	} else if (seq(line, "write")) {
 		cmd_write(arg);
+	} else if (seq(line, "remount")) {
+		/* the kernel mounts root read-only (EROFS on write); launchd normally does `mount -uw /` */
+		long r = sys6(SYS_mount, (long)"hfs", (long)"/", MNT_UPDATE, 0, 0, 0);
+		out(r < 0 ? "remount: error " : "remount: / is read-write ");
+		outi(r < 0 ? -r : r);
+		out("\n");
 	} else if (seq(line, "mkdir")) {
 		long r = sys3(SYS_mkdir, arg ? arg : "", 0755, 0);
 		out(r < 0 ? "mkdir: error " : "mkdir: ok ");
@@ -429,6 +437,7 @@ static const char script[] =
     "ls /\n"
     "ls /etc\n"
     "cat /etc/motd\n"
+    "remount\n"
     "write /tmp/hello.txt written on HFS+ by PID 1\n"
     "mkdir /tmp/newdir\n"
     "ls /tmp\n"

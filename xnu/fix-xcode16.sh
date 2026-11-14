@@ -816,6 +816,13 @@ grep -q 'fire el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inse
 exec_c="$src/bsd/kern/kern_exec.c"
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
+#        Next boot printed neither the execve result nor any EL0 exception (IRQ count frozen at 252):
+#        the hang is inside execve. Bracket each exec step with printfs and trace mockfs vnops.
+perl -pi -e 'if (/^\t(?:lret = load_machfile\(imgp|lret = activate_exec_state\(task|error = exec_add_apple_strings\(imgp|error = namei\(ndp\);|error = exec_check_permissions\(imgp\);)/ || /^\t\terror = \(\*execsw\[i\]\.ex_imgact\)\(imgp\);/) { ($t) = /(load_machfile|activate_exec_state|exec_add_apple_strings|namei|exec_check_permissions|ex_imgact)/; $v = /lret/ ? "lret" : "error"; $_ = "\tprintf(\"fire exec >$t\\n\");\n$_\tprintf(\"fire exec <$t %d\\n\", (int)$v);\n"; }' "$exec_c"
+test "$(grep -c 'fire exec >' "$exec_c")" -eq 6 || { echo "fix-xcode16: expected 6 exec step logs"; grep -n 'fire exec >' "$exec_c"; exit 1; }
+mfvn_c="$src/bsd/miscfs/mockfs/mockfs_vnops.c"
+perl -0pi -e 's/(\nmockfs_(\w+)\(struct vnop_\w+_args \* ap\)\n\{\n)/$1\t{ static int df_n; if (df_n++ < 30) { printf("fire mockfs_$2\\n"); } } \/* fix-xcode16 *\/\n/g' "$mfvn_c"
+test "$(grep -c 'printf("fire mockfs_' "$mfvn_c")" -eq 7 || { echo "fix-xcode16: expected 7 mockfs vnop logs"; grep -n 'fire mockfs_' "$mfvn_c"; exit 1; }
 #        The panic printer halts right after drawing (wfe loop): after load_init_program the panic area
 #        came out as blue stripes, so something later in the panic path draws over it.
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"

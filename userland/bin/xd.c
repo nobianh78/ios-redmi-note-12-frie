@@ -18,6 +18,9 @@ main(int argc, char **argv)
 	for (long at = off; len > 0; at += 16) {
 		ssize_t n = read(fd, b, len < 16 ? (size_t)len : 16);
 		if (n <= 0) {
+			if (n < 0) {
+				dprintf(2, "xd: read at %ld: %s\n", at, strerror(errno));
+			}
 			break;
 		}
 		len -= n;

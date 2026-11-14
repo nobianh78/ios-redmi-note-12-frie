@@ -39,7 +39,9 @@ dfe_dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		if (off < 0 || lba >= df_emmc_sectors) {
 			break;                          /* EOF */
 		}
-		if (df_emmc_read((uint32_t)lba, dfe_dev_blk)) {
+		int rc = df_emmc_read((uint32_t)lba, dfe_dev_blk);
+		if (rc) {
+			printf("emmc: read LBA %llu failed %d\n", lba, rc);
 			err = EIO;
 			break;
 		}

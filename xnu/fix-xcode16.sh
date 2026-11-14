@@ -893,6 +893,10 @@ perl -0pi -e 's|(#ifndef XNU_KERNEL_PRIVATE\n)#include <TargetConditionals.h>\n|
 grep -q 'in-kernel HFS brings its own' "$src/osfmk/kern/debug.h" || { echo "fix-xcode16: debug.h TargetConditionals guard missing"; exit 1; }
 perl -pi -e 's|#include <AppleKeyStore/AppleKeyStoreFSServices.h>|#include "df_aks_stub.h" /* fix-xcode16 */|' "$hfs_dst/core/hfs_iokit.h"
 grep -q 'df_aks_stub.h' "$hfs_dst/core/hfs_iokit.h" || { echo "fix-xcode16: AKS header not replaced"; exit 1; }
+#        HFS.kext and HFSEncodings.kext each define the hfs_allocated counter; linked into one kernel they
+#        collide, so the encodings code uses the core's (both count through the same hfs.h macros).
+perl -pi -e 's|^uint64_t hfs_allocated __attribute__\(\(aligned\(8\)\)\);|/* hfs_allocated: defined in core/hfs_vfsutils.c (fix-xcode16) */|' "$hfs_dst/hfs_encodings/hfs_encodings.c"
+grep -q 'hfs_allocated: defined in core' "$hfs_dst/hfs_encodings/hfs_encodings.c" || { echo "fix-xcode16: hfs_allocated duplicate not removed"; exit 1; }
 for f in "$hfs_dst"/core/*.c; do perl -0pi -e 's|^|#include "df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done
 for f in "$hfs_dst"/hfs_encodings/*.c; do perl -0pi -e 's|^|#include "../core/df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done
 for f in "$hfs_dst"/core/*.c "$hfs_dst"/hfs_encodings/*.c; do

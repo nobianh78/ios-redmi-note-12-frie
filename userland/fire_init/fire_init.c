@@ -403,7 +403,10 @@ run(char *line)
 		cmd_write(arg);
 	} else if (seq(line, "remount")) {
 		/* the kernel mounts root read-only (EROFS on write); launchd normally does `mount -uw /` */
-		long r = sys6(SYS_mount, (long)"hfs", (long)"/", MNT_UPDATE, 0, 0, 0);
+		/* HFS copyin()s a struct hfs_mount_args even for an update (NULL gave EFAULT); all-zero
+		 * (user layout: fspec ptr, uid, gid, mask, encoding, timezone, flags, journal x3) keeps settings */
+		static long hfs_args[8];
+		long r = sys6(SYS_mount, (long)"hfs", (long)"/", MNT_UPDATE, (long)hfs_args, 0, 0);
 		out(r < 0 ? "remount: error " : "remount: / is read-write ");
 		outi(r < 0 ? -r : r);
 		out("\n");

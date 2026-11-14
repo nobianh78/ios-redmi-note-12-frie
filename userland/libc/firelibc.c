@@ -231,6 +231,211 @@ getenv(const char *name)
 	return NULL;
 }
 
+/* ---- memory: every block has a 16-byte header holding its usable size ---- */
+struct blk {
+	size_t size;
+	struct blk *next; /* valid only while on the free list */
+};
+static struct blk *freelist;
+static char *arena, *arena_end;
+#define ARENA (1ul << 20)
+static void *
+mmap_anon(size_t n)
+{
+	long r = sc(197, 0, (long)n, 3 /* RW */, 0x1002 /* ANON|PRIVATE */, -1, 0, 0);
+	return r == -1 ? NULL : (void *)r;
+}
+void *
+malloc(size_t n)
+{
+	n = (n + 15) & ~15ul;
+	for (struct blk **pp = &freelist; *pp; pp = &(*pp)->next) {
+		if ((*pp)->size >= n) {
+			struct blk *b = *pp;
+			*pp = b->next;
+			return (char *)b + 16;
+		}
+	}
+	if (n + 16 > (size_t)(arena_end - arena)) {
+		size_t want = n + 16 > ARENA ? (n + 16 + 0x3fff) & ~0x3ffful : ARENA;
+		char *m = mmap_anon(want);
+		if (!m) {
+			errno = 12;
+			return NULL;
+		}
+		arena = m; /* rest of the old arena is abandoned (shortcut) */
+		arena_end = m + want;
+	}
+	struct blk *b = (struct blk *)arena;
+	arena += n + 16;
+	b->size = n;
+	return (char *)b + 16;
+}
+void
+free(void *p)
+{
+	if (p) {
+		struct blk *b = (struct blk *)((char *)p - 16);
+		b->next = freelist;
+		freelist = b;
+	}
+}
+void *
+calloc(size_t a, size_t b)
+{
+	void *p = malloc(a * b);
+	if (p) {
+		memset(p, 0, a * b);
+	}
+	return p;
+}
+void *
+realloc(void *p, size_t n)
+{
+	if (!p) {
+		return malloc(n);
+	}
+	size_t old = ((struct blk *)((char *)p - 16))->size;
+	if (n <= old) {
+		return p;
+	}
+	void *q = malloc(n);
+	if (q) {
+		memcpy(q, p, old);
+		free(p);
+	}
+	return q;
+}
+char *
+strdup(const char *s)
+{
+	char *d = malloc(strlen(s) + 1);
+	return d ? strcpy(d, s) : NULL;
+}
+long
+strtol(const char *s, char **end, int base)
+{
+	while (*s == ' ' || *s == '\t') {
+		s++;
+	}
+	int neg = *s == '-';
+	if (*s == '-' || *s == '+') {
+		s++;
+	}
+	if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+		base = 16;
+	} else if (base == 0) {
+		base = *s == '0' ? 8 : 10;
+	}
+	long v = 0;
+	for (;; s++) {
+		int d = *s >= '0' && *s <= '9' ? *s - '0' : *s >= 'a' && *s <= 'z' ? *s - 'a' + 10 :
+		    *s >= 'A' && *s <= 'Z' ? *s - 'A' + 10 : 99;
+		if (d >= base) {
+			break;
+		}
+		v = v * base + d;
+	}
+	if (end) {
+		*end = (char *)s;
+	}
+	return neg ? -v : v;
+}
+int atoi(const char *s) { return (int)strtol(s, NULL, 10); }
+
+/* ---- files: the 64-bit-inode syscalls; struct stat above is their layout ---- */
+int stat(const char *path, struct stat *st) { return (int)S2(338, path, st); }
+int fstat(int fd, struct stat *st) { return (int)S2(339, fd, st); }
+int lstat(const char *path, struct stat *st) { return (int)S2(340, path, st); }
+
+struct DIR {
+	int fd, pos, len;
+	long base;
+	char buf[4096];
+};
+DIR *
+opendir(const char *path)
+{
+	int fd = open(path, O_RDONLY | 0x100000 /* O_DIRECTORY */);
+	if (fd < 0) {
+		return NULL;
+	}
+	DIR *d = calloc(1, sizeof(*d));
+	if (!d) {
+		close(fd);
+		return NULL;
+	}
+	d->fd = fd;
+	return d;
+}
+struct dirent *
+readdir(DIR *d)
+{
+	if (d->pos >= d->len) {
+		long n = S4(344 /* getdirentries64 */, d->fd, d->buf, sizeof(d->buf), &d->base);
+		if (n <= 0) {
+			return NULL;
+		}
+		d->len = (int)n;
+		d->pos = 0;
+	}
+	struct dirent *e = (struct dirent *)(d->buf + d->pos);
+	d->pos += e->d_reclen;
+	return e;
+}
+int
+closedir(DIR *d)
+{
+	int r = close(d->fd);
+	free(d);
+	return r;
+}
+
+/* ---- setjmp/longjmp ---- */
+__asm__(".globl _setjmp\n_setjmp:\n"
+    "\tstp x19, x20, [x0, #0]\n\tstp x21, x22, [x0, #16]\n\tstp x23, x24, [x0, #32]\n"
+    "\tstp x25, x26, [x0, #48]\n\tstp x27, x28, [x0, #64]\n\tstp x29, x30, [x0, #80]\n"
+    "\tmov x2, sp\n\tstr x2, [x0, #96]\n"
+    "\tstp d8, d9, [x0, #104]\n\tstp d10, d11, [x0, #120]\n\tstp d12, d13, [x0, #136]\n\tstp d14, d15, [x0, #152]\n"
+    "\tmov x0, #0\n\tret\n"
+    ".globl _longjmp\n_longjmp:\n"
+    "\tldp x19, x20, [x0, #0]\n\tldp x21, x22, [x0, #16]\n\tldp x23, x24, [x0, #32]\n"
+    "\tldp x25, x26, [x0, #48]\n\tldp x27, x28, [x0, #64]\n\tldp x29, x30, [x0, #80]\n"
+    "\tldr x2, [x0, #96]\n\tmov sp, x2\n"
+    "\tldp d8, d9, [x0, #104]\n\tldp d10, d11, [x0, #120]\n\tldp d12, d13, [x0, #136]\n\tldp d14, d15, [x0, #152]\n"
+    "\tcmp w1, #0\n\tcsinc w0, w1, wzr, ne\n\tret\n");
+
+/* ---- signals: the kernel enters our trampoline, which runs the handler and calls sigreturn
+ * with the token the kernel passed in x5 ---- */
+static void
+sigtramp(void (*h)(int), int style, int sig, void *info, void *uctx, long token)
+{
+	(void)info;
+	h(sig);
+	sc(184 /* sigreturn */, (long)uctx, style, token, 0, 0, 0, 0);
+	for (;;) {
+	}
+}
+void (*signal(int sig, void (*h)(int)))(int)
+{
+	struct {
+		void *handler, *tramp;
+		unsigned mask;
+		int flags;
+	} n = { (void *)h, (void *)sigtramp, 0, 0x2 /* SA_RESTART */ };
+	struct {
+		void *handler;
+		unsigned mask;
+		int flags;
+	} o;
+	if (S3(46 /* sigaction */, sig, &n, &o) < 0) {
+		return (void (*)(int)) - 1;
+	}
+	return (void (*)(int))o.handler;
+}
+int kill(pid_t pid, int sig) { return (int)S3(37, pid, sig, 1 /* posix */); }
+
 /* ---- formatted output (buffered per call, so lines are not split into 1-byte writes) ---- */
 struct obuf {
 	int fd;

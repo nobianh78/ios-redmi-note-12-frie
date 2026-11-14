@@ -62,4 +62,63 @@ int dprintf(int fd, const char *fmt, ...);
 int puts(const char *s);
 char *getenv(const char *name);
 
+/* memory (mmap-backed; shortcut: first-fit free list, no coalescing; fine for small tools) */
+void *malloc(size_t n);
+void free(void *p);
+void *calloc(size_t a, size_t b);
+void *realloc(void *p, size_t n);
+char *strdup(const char *s);
+long strtol(const char *s, char **end, int base);
+int atoi(const char *s);
+
+/* files */
+struct stat {
+	int st_dev;
+	unsigned short st_mode, st_nlink;
+	unsigned long st_ino;
+	unsigned st_uid, st_gid;
+	int st_rdev;
+	long st_atime, st_atimensec, st_mtime, st_mtimensec, st_ctime, st_ctimensec, st_btime, st_btimensec;
+	long st_size, st_blocks;
+	int st_blksize;
+	unsigned st_flags, st_gen;
+	int st_lspare;
+	long st_qspare[2];
+};
+#define S_IFMT  0170000
+#define S_IFDIR 0040000
+#define S_IFREG 0100000
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
+int fstat(int fd, struct stat *st);
+
+struct dirent {
+	unsigned long d_ino, d_seekoff;
+	unsigned short d_reclen, d_namlen;
+	unsigned char d_type;
+	char d_name[1024];
+};
+typedef struct DIR DIR;
+DIR *opendir(const char *path);
+struct dirent *readdir(DIR *d);
+int closedir(DIR *d);
+
+/* non-local jumps: x19-x30, sp, d8-d15 */
+typedef long jmp_buf[22];
+int setjmp(jmp_buf b) __attribute__((returns_twice));
+void longjmp(jmp_buf b, int v) __attribute__((noreturn));
+
+/* signals */
+#define SIGINT  2
+#define SIGKILL 9
+#define SIGTERM 15
+#define SIGCHLD 20
+#define SIGUSR1 30
+#define SIG_DFL ((void (*)(int))0)
+#define SIG_IGN ((void (*)(int))1)
+void (*signal(int sig, void (*h)(int)))(int);
+int kill(pid_t pid, int sig);
+
 #endif

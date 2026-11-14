@@ -1047,6 +1047,9 @@ cp "$(dirname "$0")/TargetConditionals.h" "$pth_dst/kern/df_targetconditionals.h
 	# pthread.kext defines current_uthread(); the kernel has its own
 	perl -pi -e 's/\bcurrent_uthread\b/df_pth_current_uthread/g' kern/*.c kern/*.h
 	for f in kern/*.c; do perl -0pi -e 's|^|#include "df_pth_config.h" /* fix-xcode16 */\n|' "$f"; done
+	# bsd/ objects share one flat directory: libpthread's kern_synch.o replaced the kernel's own
+	# (bsd/kern/kern_synch.c: msleep, wakeup, ... went undefined). Prefix the file names.
+	for f in kern/*.c; do mv "$f" "kern/df_pth_$(basename "$f")"; done
 )
 for f in "$pth_dst"/kern/*.c; do
 	printf 'bsd/pthread/df_libpthread/kern/%s\tstandard\n' "$(basename "$f")"

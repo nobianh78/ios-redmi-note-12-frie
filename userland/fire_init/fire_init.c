@@ -20,6 +20,11 @@
 #define SYS_gettimeofday    116
 #define SYS_sysctl          202
 #define SYS_getdirentries64 344
+#define SYS_fsync           95
+#define SYS_mkdir           136
+#define O_WRONLY    0x0001
+#define O_CREAT     0x0200
+#define O_TRUNC     0x0400
 
 #define O_RDONLY    0x0000
 #define O_RDWR      0x0002
@@ -295,9 +300,59 @@ cmd_ls(const char *path)
 }
 
 static void
+cmd_cat(const char *path)
+{
+	long fd = sys3(SYS_open, path ? path : "", O_RDONLY, 0);
+	if (fd < 0) {
+		out("cat: open error ");
+		outi(-fd);
+		out("\n");
+		return;
+	}
+	char buf[512];
+	long n;
+	while ((n = sys3(SYS_read, fd, buf, sizeof(buf))) > 0) {
+		outn(buf, (size_t)n);
+	}
+	sys3(SYS_close, fd, 0, 0);
+}
+/* write FILE TEXT: create/truncate FILE and store TEXT plus a newline (tests HFS+ writes). */
+static void
+cmd_write(char *arg)
+{
+	char *text = arg;
+	while (text && *text && *text != ' ') {
+		text++;
+	}
+	if (!arg || !*text) {
+		out("usage: write FILE TEXT\n");
+		return;
+	}
+	*text++ = 0;
+	long fd = sys3(SYS_open, arg, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		out("write: open error ");
+		outi(-fd);
+		out("\n");
+		return;
+	}
+	size_t n = slen(text);
+	long w = sys3(SYS_write, fd, text, n);
+	sys3(SYS_write, fd, "\n", 1);
+	long c = sys3(SYS_fsync, fd, 0, 0);
+	sys3(SYS_close, fd, 0, 0);
+	out("wrote ");
+	outi(w + 1);
+	out(" bytes (fsync ");
+	outi(c);
+	out(")\n");
+}
+
+static void
 help(void)
 {
-	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | sleep N | help | exit [N]\n");
+	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | cat FILE | write FILE TEXT |"
+	    " mkdir DIR | sleep N | help | exit [N]\n");
 }
 
 /* Run one command line (modified in place). */
@@ -340,6 +395,15 @@ run(char *line)
 		cmd_uptime();
 	} else if (seq(line, "ls")) {
 		cmd_ls(arg);
+	} else if (seq(line, "cat")) {
+		cmd_cat(arg);
+	} else if (seq(line, "write")) {
+		cmd_write(arg);
+	} else if (seq(line, "mkdir")) {
+		long r = sys3(SYS_mkdir, arg ? arg : "", 0755, 0);
+		out(r < 0 ? "mkdir: error " : "mkdir: ok ");
+		outi(r < 0 ? -r : r);
+		out("\n");
 	} else if (seq(line, "sleep")) {
 		cmd_sleep(arg);
 	} else if (seq(line, "help")) {
@@ -362,7 +426,13 @@ static const char script[] =
     "hw\n"
     "pid\n"
     "uptime\n"
-    "ls /dev\n"
+    "ls /\n"
+    "ls /etc\n"
+    "cat /etc/motd\n"
+    "write /tmp/hello.txt written on HFS+ by PID 1\n"
+    "mkdir /tmp/newdir\n"
+    "ls /tmp\n"
+    "cat /tmp/hello.txt\n"
     "sleep 2\n"
     "uptime\n"
     "echo script done\n";

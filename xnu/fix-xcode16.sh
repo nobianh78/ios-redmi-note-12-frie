@@ -1046,6 +1046,9 @@ cp "$(dirname "$0")/TargetConditionals.h" "$pth_dst/kern/df_targetconditionals.h
 	perl -pi -e 's|vm_kernel_unslide_or_perm_external\(ptr, &unslid_ptr\)|vm_kernel_unslide_or_perm_external((vm_offset_t)ptr, \&unslid_ptr) /* fix-xcode16 */|' kern/kern_trace.h
 	# pthread.kext defines current_uthread(); the kernel has its own
 	perl -pi -e 's/\bcurrent_uthread\b/df_pth_current_uthread/g' kern/*.c kern/*.h
+	# ... and the kext's pthread_kern callbacks pointer clashes with a kernel global of the same name;
+	# the kernel fills it through the pointer passed to pthread_kext_register, so a rename is safe
+	perl -pi -e 's/\bpthread_kern\b/df_pthread_kern/g' kern/*.c kern/*.h
 	for f in kern/*.c; do perl -0pi -e 's|^|#include "df_pth_config.h" /* fix-xcode16 */\n|' "$f"; done
 	# bsd/ objects share one flat directory: libpthread's kern_synch.o replaced the kernel's own
 	# (bsd/kern/kern_synch.c: msleep, wakeup, ... went undefined). Prefix the file names.

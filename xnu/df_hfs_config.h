@@ -15,4 +15,8 @@
 #ifndef CONFIG_SEARCHFS
 #define CONFIG_SEARCHFS 1
 #endif
+
+/* KPI functions that <sys/sysctl.h> etc. only declare for kexts (#ifndef XNU_KERNEL_PRIVATE). */
+#include <sys/types.h>
+int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
 #endif

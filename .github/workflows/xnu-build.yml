@@ -100,6 +100,7 @@ jobs:
         working-directory: build-xnu
         env:
           MACHINE_CONFIG: VMAPPLE
+          MAKEFLAGS: -k     # keep compiling after an error: one run reports every broken file
         # On failure, surface the errors as annotations (readable via the public API without login).
         # GitHub keeps only 10 per step, so undefined symbols are folded into one line.
         # build.sh can exit 0 without producing a kernel (some steps end in `|| true`), so judge by output.

@@ -47,6 +47,33 @@ jobs:
           perl -pi -e 's|^(\s*git clone --branch "\$\{XNU_VERSION\}" https://github.com/apple-oss-distributions/xnu.git "\$\{WORK_DIR\}/xnu")\s*$|$1\n        bash "$ENV{GITHUB_WORKSPACE}/xnu/fix-xcode16.sh" "\${WORK_DIR}/xnu"\n|' build.sh
           grep -n 'fix-xcode16.sh' build.sh
 
+      # Incremental builds: restore the xnu tree, the object dirs and the fakeroot (mig/ctf tools,
+      # installed headers) from the last run. build.sh then skips the clone and the tool builds,
+      # and make only rebuilds what fix-xcode16.sh touched. A workflow edit starts a fresh cache.
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build-xnu/xnu
+            build-xnu/build
+            build-xnu/fakeroot
+          key: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-${{ github.sha }}
+          restore-keys: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-
+
+      # build.sh only runs fix-xcode16.sh right after cloning, and skips the whole kernel build if the
+      # last kernel image exists. With a cached tree: reset it to pristine (only patched files get new
+      # mtimes), re-apply our patches (build.sh's own patches() still runs after), drop the old kernels.
+      - name: Prepare cached tree
+        if: steps.cache.outputs.cache-matched-key != ''
+        run: |
+          git -C build-xnu/xnu checkout -q -- .
+          git -C build-xnu/xnu clean -fdq
+          bash xnu/fix-xcode16.sh build-xnu/xnu
+          rm -f build-xnu/build/xnu.obj/kernel.*
+          rm -rf build-xnu/fakeroot/System/Library/Kernels
+          echo "::notice::incremental build from cache ${{ steps.cache.outputs.cache-matched-key }}"
+
       - name: Deps (oldest Xcode available)
         run: |
           brew tap blacktop/tap
@@ -96,6 +123,16 @@ jobs:
           ls fakeroot/System/Library/Kernels/kernel* >/dev/null 2>&1 || report
           ls -lah fakeroot/System/Library/Kernels/
           file fakeroot/System/Library/Kernels/kernel*   # expect arm64, not arm64e
+
+      - name: Save build cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build-xnu/xnu
+            build-xnu/build
+            build-xnu/fakeroot
+          key: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-${{ github.sha }}
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

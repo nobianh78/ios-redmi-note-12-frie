@@ -93,7 +93,7 @@ hfs_get_platform_serial_number(char *serial_number_str, uint32_t len)
 	return KERN_NOT_SUPPORTED;
 }
 
-#if CONFIG_PROTECT
+#if CONFIG_PROTECT      /* off in the kext view (df_hfs_config.h); kept for an iOS-style config */
 /* No AppleKeyStore on fire: content-protected volumes cannot be unlocked. */
 int
 hfs_unwrap_key(aks_cred_t access, const aks_wrapped_key_t wrapped_key_in, aks_raw_key_t key_out)

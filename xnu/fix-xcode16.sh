@@ -291,6 +291,22 @@ df_puts(const char *s, unsigned long caller)
  * shortcut: no lock, no scrolling; fine on one CPU during bring-up, replace with a real fb console later.
  */
 static unsigned df_con_row, df_con_col;
+static uint64_t df_irq_count;   /* tentative definition; the IRQ status code below owns it */
+static void
+df_con_glyph(volatile uint32_t *fb, char c, uint32_t color)
+{
+	const unsigned pitch = 4320 / 4, top = 1310;
+	unsigned ch = (c == '\t') ? ' ' : (c < 0x20 || c > 0x7e) ? '?' : (unsigned)c;
+	for (int fy = 0; fy < 8; fy++) {
+		uint8_t bits = font8x8[ch - 0x20][fy];
+		volatile uint32_t *px = &fb[(top + df_con_row * 9 + fy) * pitch + df_con_col * 8];
+		for (int fx = 0; fx < 8; fx++) {
+			px[fx] = (bits & (1 << fx)) ? color : 0xff000000;
+		}
+		__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)px) : "memory");
+	}
+	df_con_col++;
+}
 void df_cons_write(const char *s, int n);
 void
 df_cons_write(const char *s, int n)
@@ -312,6 +328,15 @@ df_cons_write(const char *s, int n)
 					__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
 				}
 			}
+			/* yellow IRQ count at the start of each line: shows when the timer IRQs stop */
+			char d[20];
+			int t = 0;
+			uint64_t v = df_irq_count;
+			do { d[t++] = (char)('0' + v % 10); v /= 10; } while (v);
+			while (t) {
+				df_con_glyph(fb, d[--t], 0xffffff00);
+			}
+			df_con_glyph(fb, ' ', 0xffffff00);
 			if (c == '\n') {
 				continue;
 			}
@@ -319,16 +344,7 @@ df_cons_write(const char *s, int n)
 		if (c == '\r') {
 			continue;
 		}
-		unsigned ch = (c == '\t') ? ' ' : (c < 0x20 || c > 0x7e) ? '?' : (unsigned)c;
-		for (int fy = 0; fy < 8; fy++) {
-			uint8_t bits = font8x8[ch - 0x20][fy];
-			volatile uint32_t *px = &fb[(top + df_con_row * 9 + fy) * pitch + df_con_col * 8];
-			for (int fx = 0; fx < 8; fx++) {
-				px[fx] = (bits & (1 << fx)) ? 0xffffffff : 0xff000000;
-			}
-			__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)px) : "memory");
-		}
-		df_con_col++;
+		df_con_glyph(fb, c, 0xffffffff);
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
@@ -793,6 +809,13 @@ grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic 
 sleh_c="$src/osfmk/arm64/sleh.c"
 perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
+#        Fire hangs (no panic) after "attempting to load /sbin/launchd". Log the first 40 exceptions taken
+#        from EL0 (SVC = syscalls of PID 1, aborts = its faults) and what execve returned.
+perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && df_n < 40) { df_n++; printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); } } /* fix-xcode16 */\n|' "$sleh_c"
+grep -q 'fire el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
+exec_c="$src/bsd/kern/kern_exec.c"
+perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
+grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
 #        The panic printer halts right after drawing (wfe loop): after load_init_program the panic area
 #        came out as blue stripes, so something later in the panic path draws over it.
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"

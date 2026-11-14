@@ -903,6 +903,17 @@ for f in "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cp
 	perl -pi -e 's/kern_return_t ret = amfi->OSEntitlements\./kern_return_t ret = (amfi == NULL) ? KERN_FAILURE : \/* fix-xcode16: no AMFI *\/ amfi->OSEntitlements./' "$f"
 done
 test "$(cat "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp" | grep -c 'fix-xcode16: no AMFI')" -eq 4 || { echo "fix-xcode16: expected 4 amfi NULL guards"; grep -n 'amfi->OSEntitlements' "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient.cpp"; exit 1; }
+#        With AMFI guarded, execve returns and PID 1 runs: its first syscall (open "/dev/console", x16=5) never
+#        returns. Trace the BSD syscall dispatch (first 40) and the steps of open1/vn_open_auth.
+sc_arm="$src/bsd/dev/arm/systemcalls.c"
+perl -0pi -e 's|(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)|\n\tstatic int df_sc; int df_sc_on = df_sc++ < 40; /* fix-xcode16 */\n\tif (df_sc_on) { printf("fire sys %d pid %d >\\n", code, pid); }$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n|' "$sc_arm"
+grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
+vfsop_c="$src/bsd/vfs/vfs_syscalls.c"
+perl -pi -e '$in = 1 if /^open1\(vfs_context_t ctx, struct nameidata \*ndp, int uflags,/; if ($in && /^\tif \(\(error = (falloc_withinit|vn_open_auth)\(/) { $_ = "\tprintf(\"fire open1 $1\\n\");\n$_"; } $in = 0 if $in && /^\}/;' "$vfsop_c"
+test "$(grep -c 'fire open1 ' "$vfsop_c")" -eq 2 || { echo "fix-xcode16: open1 trace not inserted"; exit 1; }
+vnop_c="$src/bsd/vfs/vfs_vnops.c"
+perl -pi -e '$in = 1 if /^vn_open_auth\(struct nameidata \*ndp/; if ($in && /^(\t+)if \(\(error = namei\(ndp\)\)\) \{/) { $_ = "$1printf(\"fire vn_open namei\\n\");\n$_"; } if ($in && /^(\t+)error = (vn_authorize_open_existing|VNOP_OPEN|vn_open_auth_finish)\(vp, /) { ($i, $f) = ($1, $2); $_ = "${i}printf(\"fire vn_open $f >\\n\");\n$_${i}printf(\"fire vn_open $f < %d\\n\", error);\n"; } $in = 0 if $in && /^\}/;' "$vnop_c"
+test "$(grep -c 'fire vn_open ' "$vnop_c")" -ge 7 || { echo "fix-xcode16: vn_open_auth trace too short"; grep -n 'fire vn_open' "$vnop_c"; exit 1; }
 mfvn_c="$src/bsd/miscfs/mockfs/mockfs_vnops.c"
 perl -0pi -e 's/(\nmockfs_(\w+)\(struct vnop_\w+_args \* ap\)\n\{\n)/$1\t{ static int df_n; if (df_n++ < 30) { printf("fire mockfs_$2\\n"); } } \/* fix-xcode16 *\/\n/g' "$mfvn_c"
 test "$(grep -c 'printf("fire mockfs_' "$mfvn_c")" -eq 7 || { echo "fix-xcode16: expected 7 mockfs vnop logs"; grep -n 'fire mockfs_' "$mfvn_c"; exit 1; }

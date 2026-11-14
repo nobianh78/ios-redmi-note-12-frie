@@ -511,7 +511,7 @@ cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
 #        Fire now hangs silently after IOKit started (likely waiting for a root device): mirror all
 #        console output to the screen so the kernel log is readable.
 sc_c="$src/osfmk/console/serial_console.c"
-perl -0pi -e 's|^|extern void df_cons_write(const char *, int); /* fix-xcode16: fire on-screen log */\n|; s|(\nconsole_write\(char \*str, int size\)\n\{\n\tassert\(str != NULL\);\n)|$1\tdf_cons_write(str, size); /* fix-xcode16 */\n|' "$sc_c"
+perl -0pi -e 's|^|extern void df_cons_write(const char *, int); /* fix-xcode16: fire on-screen log */\n|; s|(\nconsole_write\(char \*str, int size\)\n\{\n\tassert\(str != NULL\);\n)|$1\tdf_cons_write(str, size); /* fix-xcode16 */\n\tif (size >= 0) { return; } /* fix-xcode16 (no unreachable-code warning): fire has no console device; the ring flush blocked PID 1 (printf never returned) */\n|' "$sc_c"
 grep -q 'df_cons_write(str, size); /\* fix-xcode16' "$sc_c" || { echo "fix-xcode16: console_write hook missing"; exit 1; }
 arm_init="$src/osfmk/arm/arm_init.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$arm_init"

@@ -883,8 +883,14 @@ cp "$hfs_tmp"/core/*.c "$hfs_tmp"/core/*.h "$hfs_dst/core/"
 cp "$hfs_tmp"/hfs_encodings/hfs_encodings.c "$hfs_tmp"/hfs_encodings/hfs_encodinghint.c "$hfs_tmp"/hfs_encodings/*.h "$hfs_dst/hfs_encodings/"
 rm -rf "$hfs_tmp"
 cp "$(dirname "$0")/df_hfs_config.h" "$(dirname "$0")/df_aks_stub.h" "$(dirname "$0")/df_hfs_glue.c" "$hfs_dst/core/"
-#        Kernel headers include <TargetConditionals.h> on the kext path; the xnu tree has none.
-[ -f "$src/EXTERNAL_HEADERS/TargetConditionals.h" ] || cp "$(dirname "$0")/TargetConditionals.h" "$src/EXTERNAL_HEADERS/"
+#        Kernel headers include <TargetConditionals.h> on the kext path (osfmk/kern/debug.h) and the xnu
+#        tree has none. Not in EXTERNAL_HEADERS: corecrypto/cc_config.h probes __has_include(<TargetConditionals.h>),
+#        so a global copy changes how the kernel itself builds (model_dep.c started wanting
+#        iBoot_Stage_2_version). Only HFS gets it (df_hfs_config.h includes it); debug.h skips its
+#        include when the macros are already there.
+cp "$(dirname "$0")/TargetConditionals.h" "$hfs_dst/core/df_targetconditionals.h"
+perl -0pi -e 's|(#ifndef XNU_KERNEL_PRIVATE\n)#include <TargetConditionals.h>\n|$1#ifndef __TARGETCONDITIONALS__ /* fix-xcode16: in-kernel HFS brings its own */\n#include <TargetConditionals.h>\n#endif\n|' "$src/osfmk/kern/debug.h"
+grep -q 'in-kernel HFS brings its own' "$src/osfmk/kern/debug.h" || { echo "fix-xcode16: debug.h TargetConditionals guard missing"; exit 1; }
 perl -pi -e 's|#include <AppleKeyStore/AppleKeyStoreFSServices.h>|#include "df_aks_stub.h" /* fix-xcode16 */|' "$hfs_dst/core/hfs_iokit.h"
 grep -q 'df_aks_stub.h' "$hfs_dst/core/hfs_iokit.h" || { echo "fix-xcode16: AKS header not replaced"; exit 1; }
 for f in "$hfs_dst"/core/*.c; do perl -0pi -e 's|^|#include "df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done

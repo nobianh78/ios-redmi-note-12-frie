@@ -9,6 +9,7 @@
 #include <mach/mach_types.h>
 #include <sys/mount.h>
 #include <libkern/libkern.h>
+#include <libkern/OSKextLib.h>
 
 #include "hfs_iokit.h"
 #include "hfs.h"
@@ -66,6 +67,13 @@ df_hfs_start(void)
 	hfs_init_zones();
 	hfs_sysctl_register();
 	printf("fire hfs: HFS+ registered (hfs-627.100.6, built into the kernel)\n");
+}
+
+/* Normally from the kext's libkmod glue; HFS is not a loaded kext here. */
+OSKextLoadTag
+OSKextGetCurrentLoadTag(void)
+{
+	return 0;
 }
 
 int

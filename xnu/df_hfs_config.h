@@ -12,6 +12,8 @@
 #ifndef DF_HFS_CONFIG_H
 #define DF_HFS_CONFIG_H
 
+#include "df_targetconditionals.h"  /* <TargetConditionals.h> of a macOS arm64 kext, HFS-only */
+
 #undef XNU_KERNEL_PRIVATE
 #undef BSD_KERNEL_PRIVATE
 #undef MACH_KERNEL_PRIVATE

@@ -88,15 +88,36 @@ seq(const char *a, const char *b)
 	}
 	return *a == *b;
 }
+/* Output is line-buffered: the console driver drops 1-byte writes (kmoutput hands them to kmputc,
+ * which writes nothing here), so single digits vanished. Flush on newline, when full, and before reads. */
+static char obuf[512];
+static size_t olen;
 static void
-out(const char *s)
+flush(void)
 {
-	sys3(SYS_write, con, s, slen(s));
+	if (olen) {
+		sys3(SYS_write, con, obuf, olen);
+		olen = 0;
+	}
 }
 static void
 outn(const char *s, size_t n)
 {
-	sys3(SYS_write, con, s, n);
+	while (n--) {
+		if (olen == sizeof(obuf)) {
+			flush();
+		}
+		char c = *s++;
+		obuf[olen++] = c;
+		if (c == '\n') {
+			flush();
+		}
+	}
+}
+static void
+out(const char *s)
+{
+	outn(s, slen(s));
 }
 static void
 outu(unsigned long v)
@@ -197,12 +218,23 @@ cmd_hw(void)
 	sysctl_str(6, 2);                       /* hw.model */
 	out("\n");
 }
+/* mach_absolute_time Mach trap (-3): the hardware timebase count since boot. */
+static unsigned long
+abstime(void)
+{
+	register long x16 __asm__("x16") = -3;
+	register unsigned long x0 __asm__("x0");
+	__asm__ volatile ("svc #0x80" : "=r"(x0) : "r"(x16) : "memory", "cc");
+	return x0;
+}
 static void
 cmd_uptime(void)
 {
-	struct tv64 boot = { 0, 0, 0 };
-	sysctl2(1, 21, &boot, sizeof(boot));    /* kern.boottime */
-	long up = now_us() - (boot.sec * 1000000L + boot.usec);
+	/* kern.boottime is 0 without an RTC, so count from the timebase instead */
+	int tb = 0;
+	sysctl2(6, 23, &tb, sizeof(tb));        /* hw.tbfrequency */
+	unsigned long t = abstime();
+	long up = tb > 0 ? (long)(t / (unsigned long)tb * 1000000UL + t % (unsigned long)tb * 1000000UL / (unsigned long)tb) : 0;
 	out("up ");
 	outi(up / 1000000L);
 	out(".");
@@ -369,6 +401,7 @@ cstart(void)
 
 	for (;;) {
 		out("fire# ");
+		flush();
 		long n = sys3(SYS_read, con, line, sizeof(line) - 1);
 		if (n <= 0) {
 			out("\nfire_sh: console read returned ");

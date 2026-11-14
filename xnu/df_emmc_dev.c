@@ -32,7 +32,6 @@ static int
 dfe_dev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 {
 	int err = 0;
-	printf("emmc: dev read off %lld resid %lld\n", (long long)uio_offset(uio), (long long)uio_resid(uio)); /* debug, remove */
 	lck_mtx_lock(&dfe_mtx);
 	while (!err && uio_resid(uio) > 0) {
 		off_t off = uio_offset(uio);

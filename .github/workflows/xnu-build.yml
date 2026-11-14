@@ -50,6 +50,11 @@ jobs:
       # Incremental builds: restore the xnu tree, the object dirs and the fakeroot (mig/ctf tools,
       # installed headers) from the last run. build.sh then skips the clone and the tool builds,
       # and make only rebuilds what fix-xcode16.sh touched. A workflow edit starts a fresh cache.
+      # The KDK (~70 s to download and install each run) is cached too; build.sh skips it when the
+      # directory exists. The cache action extracts as the runner user, so own the parent dir first.
+      - name: Make the KDK dir writable
+        run: sudo mkdir -p /Library/Developer/KDKs && sudo chown "$(id -u)" /Library/Developer/KDKs
+
       - name: Restore build cache
         id: cache
         uses: actions/cache/restore@v4
@@ -58,6 +63,7 @@ jobs:
             build-xnu/xnu
             build-xnu/build
             build-xnu/fakeroot
+            /Library/Developer/KDKs/KDK_13.5_22G74.kdk
           key: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-${{ github.sha }}
           restore-keys: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-
 
@@ -132,6 +138,7 @@ jobs:
             build-xnu/xnu
             build-xnu/build
             build-xnu/fakeroot
+            /Library/Developer/KDKs/KDK_13.5_22G74.kdk
           key: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-${{ github.sha }}
 
       - name: Upload kernel

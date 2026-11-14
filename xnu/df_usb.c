@@ -471,6 +471,27 @@ df_usb_start(void)
 		df_ps_put('\n');
 	}
 
+	/* LK leaves the u2 PHY in its save-current state: U2PHYDTM0 FORCE_SUSPENDM (bit 18) with
+	 * RG_SUSPENDM=0, and no VBUS/ID forcing in U2PHYDTM1, so DEVCTL showed no session and no VBUS
+	 * (0x80) and the host saw nothing. Power it on as Linux phy-mtk-tphy does for device mode:
+	 * drop the DTM0 forces (PHY leaves suspend, 480 MHz PLL on), keep the OTG VBUS comparator on
+	 * (ACR6 bit 20), and force VBUSVALID/BVALID/AVALID/IDDIG=1, SESSEND=0 in DTM1 (0x3e2e). */
+	if (phy) {
+		volatile uint32_t *u2 = phy + (0x800 / 4);
+		u2[0x68 / 4] = 0;                               /* U2PHYDTM0: no forced suspend/termsel/... */
+		u2[0x18 / 4] |= 1u << 20;                       /* USBPHYACR6: PA6_RG_U2_OTG_VBUSCMP_EN */
+		u2[0x6c / 4] = (u2[0x6c / 4] & ~(1u << 4)) | 0x3e2e; /* U2PHYDTM1: force B-device + VBUS valid */
+		IOSleep(10);
+		df_ps_puts("fire usb: phy on ");
+		dfu_hex("dtm0", u2[0x68 / 4]);
+		dfu_hex("dtm1", u2[0x6c / 4]);
+		df_ps_put('\n');
+	}
+	dfu_w8(M_DEVCTL, (uint8_t)(dfu_r8(M_DEVCTL) | 0x01));   /* SESSION */
+	IOSleep(10);
+	dfu_hex("fire usb: devctl after phy/session", dfu_r8(M_DEVCTL));
+	df_ps_put('\n');
+
 	/* no USB IRQ: polled (see the header comment) */
 	dfu_w32(M_L1INTM, 0);
 	if (gicd) {

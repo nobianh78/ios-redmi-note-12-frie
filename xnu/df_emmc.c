@@ -77,7 +77,7 @@ int df_emmc_read(uint32_t lba, void *buf);
 int
 df_emmc_read(uint32_t lba, void *buf)
 {
-	uint32_t *p = buf, r1;
+	uint32_t *p = (uint32_t *)buf, r1;
 	dfe_w(E_FIFOCS, dfe_r(E_FIFOCS) | (1u << 31));
 	for (int i = 0; dfe_r(E_FIFOCS) & (1u << 31); i++) {
 		if (i > 1000000) {
@@ -85,9 +85,9 @@ df_emmc_read(uint32_t lba, void *buf)
 		}
 	}
 	dfe_w(E_BLK_NUM, 1);
-	int e = dfe_cmd(17, lba, 1, &r1);
-	if (e) {
-		return e;
+	int rc = dfe_cmd(17, lba, 1, &r1);
+	if (rc) {
+		return rc;
 	}
 	for (int got = 0, spin = 0; got < 128;) {
 		if ((dfe_r(E_FIFOCS) & 0xff) >= 4) {
@@ -105,6 +105,15 @@ df_emmc_read(uint32_t lba, void *buf)
 }
 
 static uint8_t dfe_blk[512];
+static uint64_t
+dfe_le(const uint8_t *p, int n)
+{
+	uint64_t v = 0;
+	while (n--) {
+		v = (v << 8) | p[n];
+	}
+	return v;
+}
 
 void df_emmc_probe(void);
 void
@@ -114,19 +123,19 @@ df_emmc_probe(void)
 	dfe = (volatile uint8_t *)ml_io_map(DFE_BASE, 0x1000);
 	dfe_w(E_INTEN, 0);                                  /* polled: no MSDC IRQ */
 	dfe_w(E_CFG, dfe_r(E_CFG) | (1u << 3));             /* PIO */
-	int e = dfe_cmd(13, 1u << 16, 0, &r1);              /* SEND_STATUS, RCA 1 */
-	printf("emmc: MSDC0 cfg %x, CMD13 %d, state %u (4 = tran)\n", dfe_r(E_CFG), e, (r1 >> 9) & 15);
+	int rc = dfe_cmd(13, 1u << 16, 0, &r1);              /* SEND_STATUS, RCA 1 */
+	printf("emmc: MSDC0 cfg %x, CMD13 %d, state %u (4 = tran)\n", dfe_r(E_CFG), rc, (r1 >> 9) & 15);
 
-	if ((e = df_emmc_read(1, dfe_blk))) {
-		printf("emmc: read LBA 1 failed %d (int %x)\n", e, dfe_r(E_INT));
+	if ((rc = df_emmc_read(1, dfe_blk))) {
+		printf("emmc: read LBA 1 failed %d (int %x)\n", rc, dfe_r(E_INT));
 		return;
 	}
-	if (memcmp(dfe_blk, "EFI PART", 8)) {
+	if (dfe_le(dfe_blk, 8) != 0x5452415020494645ULL) { /* "EFI PART" */
 		printf("emmc: LBA 1 has no GPT header (%02x %02x %02x %02x)\n", dfe_blk[0], dfe_blk[1], dfe_blk[2], dfe_blk[3]);
 		return;
 	}
-	uint64_t ent_lba = *(uint64_t *)(dfe_blk + 72), last = *(uint64_t *)(dfe_blk + 48);
-	uint32_t n = *(uint32_t *)(dfe_blk + 80), esz = *(uint32_t *)(dfe_blk + 84);
+	uint64_t ent_lba = dfe_le(dfe_blk + 72, 8), last = dfe_le(dfe_blk + 48, 8);
+	uint32_t n = (uint32_t)dfe_le(dfe_blk + 80, 4), esz = (uint32_t)dfe_le(dfe_blk + 84, 4);
 	printf("emmc: GPT ok, %u entries of %u bytes at LBA %llu, disk %llu MB\n", n, esz, ent_lba,
 	    (last + 1) >> 11);
 	if (esz != 128 || n > 128) {
@@ -138,7 +147,7 @@ df_emmc_probe(void)
 			return;
 		}
 		const uint8_t *en = dfe_blk + (i % 4) * 128;
-		uint64_t a = *(const uint64_t *)(en + 32), b = *(const uint64_t *)(en + 40);
+		uint64_t a = dfe_le(en + 32, 8), b = dfe_le(en + 40, 8);
 		if (!a) {
 			continue;
 		}

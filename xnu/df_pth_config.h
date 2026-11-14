@@ -13,4 +13,10 @@
 #ifndef __startup_func
 #define __startup_func
 #endif
+/* The libpthread project builds the kext with this: it exposes _pthread_priority_*() and the WQ_*
+ * workqueue constants in the kernel's bsd/pthread headers. */
+#define __PTHREAD_EXPOSE_INTERNALS__ 1
+/* pointer <-> integer conversions (trace args, user_addr_t) were warnings for the compilers this
+ * release was built with; Xcode 16's clang makes them errors. */
+#pragma clang diagnostic warning "-Wint-conversion"
 #endif

@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/xnu-build.yml', 'xnu/**']
+    paths: ['.github/workflows/xnu-build.yml', 'xnu/**', 'userland/**', 'tools/macho_static.js']
 
 env:
   MACOS_VERSION: '13.5'          # xnu-8796; unset makes build.sh prompt (gum choose)
@@ -140,6 +140,46 @@ jobs:
             build-xnu/fakeroot
             /Library/Developer/KDKs/KDK_13.5_22G74.kdk
           key: xnu8796-${{ hashFiles('.github/workflows/xnu-build.yml') }}-${{ github.sha }}
+
+      # P2 root filesystem: a raw HFS+ volume (no partition map, not journaled) holding PID 1
+      # (fire_init/fire_sh as /sbin/launchd) and the directories the kernel expects (/dev for devfs).
+      # The loader packs it as the md0 RAMDisk.
+      - name: Build fire_init and the HFS+ root image
+        run: |
+          set -e
+          mkdir -p out/init
+          clang -target arm64-apple-macos11 -O2 -ffreestanding -fno-stack-protector -fno-builtin -mcpu=cortex-a55 \
+            -c userland/fire_init/fire_init.c -o out/init/fire_init.o
+          # ld64 links a static image (LC_UNIXTHREAD) directly; otherwise convert an LC_MAIN image the
+          # way the Windows build does (tools/macho_static.js).
+          if ld -arch arm64 -platform_version macos 11.0 11.0 -static -e _start -o out/init/fire_init.static out/init/fire_init.o; then
+            otool -l out/init/fire_init.static | grep -q LC_UNIXTHREAD
+          else
+            ld -arch arm64 -platform_version macos 11.0 11.0 -e _start -undefined dynamic_lookup -o out/init/fire_init out/init/fire_init.o
+            node tools/macho_static.js out/init/fire_init out/init/fire_init.static
+          fi
+          otool -l out/init/fire_init.static | grep -E 'cmd LC_|segname' | sort | uniq -c
+          hdiutil create -size 16m -fs HFS+ -volname fire -layout NONE -type UDIF -o out/fire_root.dmg
+          hdiutil attach out/fire_root.dmg -mountpoint /tmp/fireroot -nobrowse -owners on
+          sudo mkdir -p /tmp/fireroot/sbin /tmp/fireroot/bin /tmp/fireroot/dev /tmp/fireroot/etc /tmp/fireroot/tmp
+          sudo cp out/init/fire_init.static /tmp/fireroot/sbin/launchd
+          echo "DarwinFire: HFS+ root on open-source XNU, Redmi 12 fire / MT6768" | sudo tee /tmp/fireroot/etc/motd >/dev/null
+          sudo chmod 755 /tmp/fireroot/sbin/launchd
+          sudo chmod 1777 /tmp/fireroot/tmp
+          sudo chown -R 0:0 /tmp/fireroot
+          ls -laR /tmp/fireroot | head -40
+          hdiutil detach /tmp/fireroot
+          hdiutil convert out/fire_root.dmg -format UDTO -o out/fire_root
+          mv out/fire_root.cdr out/fire_root.img
+          ls -la out/fire_root.img
+          xxd -s 1024 -l 16 out/fire_root.img     # expect "H+" at the volume header
+
+      - name: Upload root image
+        uses: actions/upload-artifact@v4
+        with:
+          name: fire-root-hfs
+          path: out/fire_root.img
+          if-no-files-found: error
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4

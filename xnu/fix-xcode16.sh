@@ -31,10 +31,10 @@ echo "fix-xcode16: renamed duplicate pmap reserved10 (no-PAC build)"
 #    lib<MACHINE>.os.<CONFIG>.a from the KDK (makedefs/MakeInc.def). Enable the open sources, and drop
 #    PPL (config_pmap_ppl): it needs Apple's APRR/GXF hardware, which Cortex cores do not have.
 master="$src/config/MASTER.arm64.MacOSX"
-#    Also enable mockfs ("boot from an executable"): fire's root device is an in-memory Mach-O that mockfs
-#    serves as /sbin/launchd, so no HFS/APFS (closed kexts) is needed to reach userland.
-perl -pi -e 's/^(#\s*KERNEL_BASE\s*=\s*\[\s*arm64) config_pmap_ppl /$1 nos_arm_asm nos_arm_pmap mockfs /' "$master"
-grep -q 'KERNEL_BASE.*nos_arm_asm nos_arm_pmap mockfs' "$master" || { echo "fix-xcode16: MASTER nos_arm fix did not apply"; exit 1; }
+#    mockfs (the first root: one in-memory Mach-O served as /sbin/launchd) is no longer configured: the
+#    root is now an HFS+ ramdisk (P2, below), and mockfs would claim md0 first at root-mount time.
+perl -pi -e 's/^(#\s*KERNEL_BASE\s*=\s*\[\s*arm64) config_pmap_ppl /$1 nos_arm_asm nos_arm_pmap /' "$master"
+grep -q 'KERNEL_BASE.*nos_arm_asm nos_arm_pmap' "$master" || { echo "fix-xcode16: MASTER nos_arm fix did not apply"; exit 1; }
 ! grep -q 'KERNEL_BASE.*config_pmap_ppl' "$master" || { echo "fix-xcode16: config_pmap_ppl still set"; exit 1; }
 
 makedef="$src/makedefs/MakeInc.def"
@@ -866,6 +866,34 @@ iosvc_cpp="$src/iokit/Kernel/IOService.cpp"
 perl -0pi -e 's|\tif \(wasHiding\) \{\n\t\tiomediaClass->applyToInstances\(publishHiddenMediaApplier, &ctx\);|\tif (wasHiding && iomediaClass) { /* fix-xcode16: no IOStorageFamily kext on fire */\n\t\tiomediaClass->applyToInstances(publishHiddenMediaApplier, &ctx);|' "$iosvc_cpp"
 grep -q 'no IOStorageFamily kext on fire' "$iosvc_cpp" || { echo "fix-xcode16: publishHiddenMedia not guarded"; grep -n -A3 'if (wasHiding)' "$iosvc_cpp"; exit 1; }
 echo "fix-xcode16: mockfs root from RAMDisk, static PID 1 allowed"
+
+#        P2: HFS+ root. Compile the open-source HFS core and HFSEncodings (hfs-627.100.6, the macOS 13.5
+#        release, APSL) into the kernel, since fire loads no kexts, and register HFS from bsd_init right
+#        before the root mount (setconf). df_hfs_glue.c replaces the kext's IOKit glue; df_aks_stub.h
+#        stands in for the private AppleKeyStore header. Layout keeps core/ + hfs_encodings/ because
+#        hfs.h includes "../hfs_encodings/hfs_encodings.h".
+hfs_tag=hfs-627.100.6
+hfs_tmp="$(mktemp -d)"
+git -c advice.detachedHead=false clone -q --depth 1 --branch "$hfs_tag" https://github.com/apple-oss-distributions/hfs.git "$hfs_tmp" \
+	|| { echo "fix-xcode16: hfs clone failed"; exit 1; }
+hfs_dst="$src/bsd/miscfs/df_hfs"
+rm -rf "$hfs_dst"
+mkdir -p "$hfs_dst/core" "$hfs_dst/hfs_encodings"
+cp "$hfs_tmp"/core/*.c "$hfs_tmp"/core/*.h "$hfs_dst/core/"
+cp "$hfs_tmp"/hfs_encodings/hfs_encodings.c "$hfs_tmp"/hfs_encodings/hfs_encodinghint.c "$hfs_tmp"/hfs_encodings/*.h "$hfs_dst/hfs_encodings/"
+rm -rf "$hfs_tmp"
+cp "$(dirname "$0")/df_hfs_config.h" "$(dirname "$0")/df_aks_stub.h" "$(dirname "$0")/df_hfs_glue.c" "$hfs_dst/core/"
+perl -pi -e 's|#include <AppleKeyStore/AppleKeyStoreFSServices.h>|#include "df_aks_stub.h" /* fix-xcode16 */|' "$hfs_dst/core/hfs_iokit.h"
+grep -q 'df_aks_stub.h' "$hfs_dst/core/hfs_iokit.h" || { echo "fix-xcode16: AKS header not replaced"; exit 1; }
+for f in "$hfs_dst"/core/*.c; do perl -0pi -e 's|^|#include "df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done
+for f in "$hfs_dst"/hfs_encodings/*.c; do perl -0pi -e 's|^|#include "../core/df_hfs_config.h" /* fix-xcode16 */\n|' "$f"; done
+for f in "$hfs_dst"/core/*.c "$hfs_dst"/hfs_encodings/*.c; do
+	printf 'bsd/miscfs/df_hfs/%s\tstandard\n' "${f#"$hfs_dst"/}"
+done >> "$src/bsd/conf/files"
+test "$(grep -c '^bsd/miscfs/df_hfs/' "$src/bsd/conf/files")" -ge 30 || { echo "fix-xcode16: HFS files not added to bsd/conf/files"; exit 1; }
+perl -0pi -e 's|(\n(\t+)bsd_init_kprintf\("calling setconf\\n"\);\n)|\n${2}{ extern void df_hfs_start(void); df_hfs_start(); } /* fix-xcode16: HFS+ before the root mount */$1|' "$src/bsd/kern/bsd_init.c"
+grep -q 'df_hfs_start(); } /\* fix-xcode16' "$src/bsd/kern/bsd_init.c" || { echo "fix-xcode16: df_hfs_start hook missing"; exit 1; }
+echo "fix-xcode16: HFS+ ($hfs_tag) compiled into the kernel"
 avi_c="$(dirname "$arm_init")/../arm64/arm_vm_init.c"
 perl -pi -e 's|^(\tva_l1_end = va_l1 \+ \(\(2 \+ \(mem_segments \* 10\))\) << 20\);|$1 + 64) << 20); /* fix-xcode16: room for early io_map */|' "$avi_c"
 grep -q 'room for early io_map' "$avi_c" || { echo "fix-xcode16: L3 prealloc patch failed"; exit 1; }

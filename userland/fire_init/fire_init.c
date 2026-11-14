@@ -437,7 +437,9 @@ cmd_run(char *arg)
 	argv[argc] = 0;
 	char fire_env[] = "FIRE=on-xnu";
 	char path_env[] = "PATH=/bin:/sbin";
-	char *envp[] = { fire_env, path_env, 0 };
+	char ps1_env[] = "PS1=fire$ ";
+	char home_env[] = "HOME=/";
+	char *envp[] = { fire_env, path_env, ps1_env, home_env, 0 };
 	flush();
 	register long x16 __asm__("x16") = SYS_fork;
 	register long x0 __asm__("x0") = 0;
@@ -576,7 +578,9 @@ static const char script[] =
     "run /bin/dash /etc/test.sh\n"
     "sleep 2\n"
     "uptime\n"
-    "echo script done\n";
+    "echo script done\n"
+    /* the console shell from here on; `exit` in dash returns to fire_sh */
+    "run /bin/dash -i\n";
 
 void cstart(void);
 /* LC_UNIXTHREAD enters with SP at argc, only 8-byte aligned; AArch64 faults on a misaligned SP. */

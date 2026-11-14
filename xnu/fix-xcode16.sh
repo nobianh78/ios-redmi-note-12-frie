@@ -516,6 +516,9 @@ cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
 #        USB CDC-ACM console on USB0 (polled MUSB device): kernel log + /dev/console over a PC COM port.
 cat "$(dirname "$0")/df_usb.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
 grep -q '^df_usb_start(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_usb.c not appended"; exit 1; }
+#        P5: read-only eMMC (MSDC0 PIO); prints the GPT at boot.
+cat "$(dirname "$0")/df_emmc.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
+grep -q '^df_emmc_probe(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_emmc.c not appended"; exit 1; }
 #        kmputc dropped every 1-byte console write (single digits, tty echo): always pass it on.
 km_c="$src/bsd/dev/arm/km.c"
 perl -0pi -e 's|(\nkmputc\(__unused dev_t dev, char c\)\n\{\n)\tif \(!disableConsoleOutput && initialized\) \{|$1\tif (1) { /* fix-xcode16: fire has no other console, never drop 1-byte writes */|' "$km_c"
@@ -1123,6 +1126,8 @@ exec_c="$src/bsd/kern/kern_exec.c"
 #        branches, and the first attempt hooked one that does not run.
 perl -0pi -e 's|(\nload_init_program\(proc_t p\)\n\{\n)|$1\t{ extern void df_usb_start(void); df_usb_start(); } /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'df_usb_start(); } /\* fix-xcode16' "$exec_c" || { echo "fix-xcode16: df_usb_start hook missing"; exit 1; }
+perl -0pi -e 's|(df_usb_start\(\); \} /\* fix-xcode16 \*/\n)|$1\t{ extern void df_emmc_probe(void); df_emmc_probe(); } /* fix-xcode16 P5 */\n|' "$exec_c"
+grep -q 'df_emmc_probe(); } /\* fix-xcode16 P5' "$exec_c" || { echo "fix-xcode16: df_emmc_probe hook missing"; exit 1; }
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,

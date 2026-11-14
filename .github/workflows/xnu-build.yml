@@ -160,12 +160,29 @@ jobs:
             node tools/macho_static.js out/init/fire_init out/init/fire_init.static
           fi
           otool -l out/init/fire_init.static | grep -E 'cmd LC_|segname' | sort | uniq -c
+          # firelibc (P4: static libc) and the programs linked with it, installed in /bin
+          CF="-target arm64-apple-macos11 -O2 -ffreestanding -fno-stack-protector -fno-builtin -mcpu=cortex-a55"
+          clang $CF -c userland/libc/firelibc.c -o out/init/firelibc.o
+          mkdir -p out/bin
+          for p in userland/bin/*.c; do
+            n=$(basename "$p" .c)
+            clang $CF -c "$p" -o "out/init/$n.o"
+            if ld -arch arm64 -platform_version macos 11.0 11.0 -static -e _start -o "out/bin/$n" "out/init/$n.o" out/init/firelibc.o; then
+              otool -l "out/bin/$n" | grep -q LC_UNIXTHREAD
+            else
+              ld -arch arm64 -platform_version macos 11.0 11.0 -e _start -undefined dynamic_lookup -o "out/init/$n" "out/init/$n.o" out/init/firelibc.o
+              node tools/macho_static.js "out/init/$n" "out/bin/$n"
+            fi
+          done
+          ls -la out/bin
           hdiutil create -size 16m -fs HFS+ -volname fire -layout NONE -type UDIF -o out/fire_root.dmg
           hdiutil attach out/fire_root.dmg -mountpoint /tmp/fireroot -nobrowse -owners on
           sudo mkdir -p /tmp/fireroot/sbin /tmp/fireroot/bin /tmp/fireroot/dev /tmp/fireroot/etc /tmp/fireroot/tmp
           sudo cp out/init/fire_init.static /tmp/fireroot/sbin/launchd
           echo "DarwinFire: HFS+ root on open-source XNU, Redmi 12 fire / MT6768" | sudo tee /tmp/fireroot/etc/motd >/dev/null
           sudo chmod 755 /tmp/fireroot/sbin/launchd
+          sudo cp out/bin/* /tmp/fireroot/bin/
+          sudo chmod 755 /tmp/fireroot/bin/*
           sudo chmod 1777 /tmp/fireroot/tmp
           sudo chown -R 0:0 /tmp/fireroot
           ls -laR /tmp/fireroot | head -40

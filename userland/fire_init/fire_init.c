@@ -411,11 +411,70 @@ cmd_thread(void)
 	out(thread_ran ? "thread: ok, the second thread ran\n" : "thread: the second thread did not run within 2 s\n");
 }
 
+/* run PATH [ARGS...]: fork + execve + wait4 (what a real shell needs). argv/envp are built on the
+ * stack at run time (no pointers in initialized data: there is no dyld to fix them up). */
+#define SYS_fork   2
+#define SYS_wait4  7
+#define SYS_execve 59
+static void
+cmd_run(char *arg)
+{
+	if (!arg) {
+		out("usage: run PATH [ARGS...]\n");
+		return;
+	}
+	char *argv[16];
+	int argc = 0;
+	for (char *p = arg; *p && argc < 15;) {
+		argv[argc++] = p;
+		while (*p && *p != ' ') {
+			p++;
+		}
+		while (*p == ' ') {
+			*p++ = 0;
+		}
+	}
+	argv[argc] = 0;
+	char fire_env[] = "FIRE=on-xnu";
+	char path_env[] = "PATH=/bin:/sbin";
+	char *envp[] = { fire_env, path_env, 0 };
+	flush();
+	register long x16 __asm__("x16") = SYS_fork;
+	register long x0 __asm__("x0") = 0;
+	register long x1 __asm__("x1") = 0;
+	unsigned long nzcv;
+	__asm__ volatile ("svc #0x80\n\tmrs %[v], nzcv" : "+r"(x0), "+r"(x1), [v] "=r"(nzcv) : "r"(x16) : "memory", "cc");
+	if (nzcv & (1ul << 29)) {
+		out("run: fork error ");
+		outi(x0);
+		out("\n");
+		return;
+	}
+	if (x1) {               /* child */
+		long r = sys3(SYS_execve, argv[0], argv, envp);
+		out("run: execve error ");
+		outi(-r);
+		out("\n");
+		flush();
+		sys3(SYS_exit, 127, 0, 0);
+	}
+	long pid = x0;
+	int status = 0;
+	long w = sys6(SYS_wait4, pid, (long)&status, 0, 0, 0, 0);
+	out("run: pid ");
+	outi(pid);
+	out(" exited, wait4 ");
+	outi(w);
+	out(" status ");
+	outi((status >> 8) & 0xff);
+	out("\n");
+}
+
 static void
 help(void)
 {
 	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | cat FILE | write FILE TEXT |"
-	    " mkdir DIR | remount | thread | sleep N | help | exit [N]\n");
+	    " mkdir DIR | remount | thread | run PATH [ARGS] | sleep N | help | exit [N]\n");
 }
 
 /* Run one command line (modified in place). */
@@ -462,6 +521,8 @@ run(char *line)
 		cmd_cat(arg);
 	} else if (seq(line, "write")) {
 		cmd_write(arg);
+	} else if (seq(line, "run")) {
+		cmd_run(arg);
 	} else if (seq(line, "thread")) {
 		cmd_thread();
 	} else if (seq(line, "remount")) {
@@ -509,6 +570,8 @@ static const char script[] =
     "ls /tmp\n"
     "cat /tmp/hello.txt\n"
     "thread\n"
+    "ls /bin\n"
+    "run /bin/hello one two\n"
     "sleep 2\n"
     "uptime\n"
     "echo script done\n";

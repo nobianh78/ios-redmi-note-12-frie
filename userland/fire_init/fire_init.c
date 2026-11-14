@@ -1,49 +1,342 @@
 /*
- * fire_init: the first userland program on the Redmi 12 "fire" XNU port (PID 1, served by mockfs as
- * /sbin/launchd). Static arm64 Mach-O, no libc, no dyld: raw BSD syscalls (svc #0x80, number in x16).
+ * fire_init: PID 1 of the Redmi 12 "fire" XNU port (served by mockfs as /sbin/launchd).
+ * Static arm64 Mach-O, no libc, no dyld: raw BSD syscalls (svc #0x80, number in x16).
  *
- * It proves userland runs: prints to /dev/console, then exits with status 0x42 on purpose, so the
- * kernel panics with "initproc exited" and that status, which the on-screen panic printer shows.
- * shortcut: no shell yet; this is the stepping stone before building a real Darwin userland.
+ * v2: a minimal shell. It runs the built-in script below, echoing each command and its output on
+ * /dev/console, then shows a "fire#" prompt and reads commands from the console.
+ * shortcut: the script is compiled in because mockfs serves the ramdisk as this single file; read
+ * scripts from a real root filesystem once there is one. No input driver yet, so the prompt only
+ * proves the read path; typing needs a touchscreen/keys driver.
  */
 
-#define SYS_exit   1
-#define SYS_write  4
-#define SYS_open   5
-#define O_WRONLY   0x0001
-#define O_NOCTTY   0x20000
+#define SYS_exit            1
+#define SYS_read            3
+#define SYS_write           4
+#define SYS_open            5
+#define SYS_close           6
+#define SYS_getpid          20
+#define SYS_getppid         39
+#define SYS_select          93
+#define SYS_gettimeofday    116
+#define SYS_sysctl          202
+#define SYS_getdirentries64 344
+
+#define O_RDONLY    0x0000
+#define O_RDWR      0x0002
+#define O_NOCTTY    0x20000
+#define O_DIRECTORY 0x100000
+
+typedef unsigned long size_t;
 
 static long
-sys3(long num, long a0, long a1, long a2)
+sys6(long num, long a0, long a1, long a2, long a3, long a4, long a5)
 {
 	register long x16 __asm__("x16") = num;
 	register long x0 __asm__("x0") = a0;
 	register long x1 __asm__("x1") = a1;
 	register long x2 __asm__("x2") = a2;
-	__asm__ volatile ("svc #0x80" : "+r"(x0) : "r"(x16), "r"(x1), "r"(x2) : "memory", "cc");
-	return x0;
+	register long x3 __asm__("x3") = a3;
+	register long x4 __asm__("x4") = a4;
+	register long x5 __asm__("x5") = a5;
+	unsigned long nzcv;
+	__asm__ volatile ("svc #0x80\n\tmrs %[f], nzcv"
+	    : "+r"(x0), "+r"(x1), [f] "=r"(nzcv)
+	    : "r"(x16), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+	    : "memory", "cc");
+	return (nzcv & (1ul << 29)) ? -x0 : x0;   /* carry set = error, x0 = errno */
+}
+#define sys3(n, a, b, c) sys6((n), (long)(a), (long)(b), (long)(c), 0, 0, 0)
+
+/* -O2 may turn loops into these calls even with -ffreestanding. */
+void *
+memset(void *d, int c, size_t n)
+{
+	unsigned char *p = d;
+	while (n--) {
+		*p++ = (unsigned char)c;
+	}
+	return d;
+}
+void *
+memcpy(void *d, const void *s, size_t n)
+{
+	unsigned char *p = d;
+	const unsigned char *q = s;
+	while (n--) {
+		*p++ = *q++;
+	}
+	return d;
 }
 
-static unsigned long
+static long con = -1;
+
+static size_t
 slen(const char *s)
 {
-	unsigned long n = 0;
+	size_t n = 0;
 	while (s[n]) {
 		n++;
 	}
 	return n;
 }
-
-static void
-say(long fd, const char *s)
+static int
+seq(const char *a, const char *b)
 {
-	sys3(SYS_write, fd, (long)s, (long)slen(s));
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+static void
+out(const char *s)
+{
+	sys3(SYS_write, con, s, slen(s));
+}
+static void
+outn(const char *s, size_t n)
+{
+	sys3(SYS_write, con, s, n);
+}
+static void
+outu(unsigned long v)
+{
+	char b[24];
+	int i = 24;
+	do {
+		b[--i] = (char)('0' + v % 10);
+		v /= 10;
+	} while (v);
+	outn(b + i, (size_t)(24 - i));
+}
+static void
+outi(long v)
+{
+	if (v < 0) {
+		out("-");
+		v = -v;
+	}
+	outu((unsigned long)v);
+}
+static unsigned long
+atou(const char *s)
+{
+	unsigned long v = 0;
+	while (*s >= '0' && *s <= '9') {
+		v = v * 10 + (unsigned long)(*s++ - '0');
+	}
+	return v;
 }
 
-/* LC_UNIXTHREAD entry: the kernel hands over with SP pointing at argc, only 8-byte aligned. AArch64
- * faults on a misaligned SP (SCTLR_EL1.SA0), so align it before any C code touches the stack
- * (the first boot died with an SP alignment fault, ESR EC 0x26, in the spin loop below). */
+/* sysctl by MIB; returns bytes read or a negative errno */
+static long
+sysctl2(int a, int b, void *buf, size_t len)
+{
+	int mib[2] = { a, b };
+	size_t l = len;
+	long r = sys6(SYS_sysctl, (long)mib, 2, (long)buf, (long)&l, 0, 0);
+	return r < 0 ? r : (long)l;
+}
+static void
+sysctl_str(int a, int b)
+{
+	char buf[256];
+	long n = sysctl2(a, b, buf, sizeof(buf) - 1);
+	if (n <= 0) {
+		out("?");
+		return;
+	}
+	buf[n] = 0;
+	out(buf);
+}
+
+struct tv64 {
+	long sec;
+	int usec;
+	int pad;
+};
+static long
+now_us(void)
+{
+	struct tv64 tv = { 0, 0, 0 };
+	sys3(SYS_gettimeofday, &tv, 0, 0);
+	return tv.sec * 1000000L + tv.usec;
+}
+
+static void
+cmd_uname(const char *arg)
+{
+	sysctl_str(1, 1);                       /* kern.ostype */
+	if (arg && seq(arg, "-a")) {
+		out(" ");
+		sysctl_str(1, 10);              /* kern.hostname */
+		out(" ");
+		sysctl_str(1, 2);               /* kern.osrelease */
+		out(" ");
+		sysctl_str(1, 4);               /* kern.version */
+		out(" ");
+		sysctl_str(6, 1);               /* hw.machine */
+	}
+	out("\n");
+}
+static void
+cmd_hw(void)
+{
+	int ncpu = 0, pg = 0;
+	unsigned long mem = 0;
+	sysctl2(6, 3, &ncpu, sizeof(ncpu));     /* hw.ncpu */
+	sysctl2(6, 7, &pg, sizeof(pg));         /* hw.pagesize */
+	sysctl2(6, 24, &mem, sizeof(mem));      /* hw.memsize */
+	out("cpus ");
+	outi(ncpu);
+	out("  pagesize ");
+	outi(pg);
+	out("  memsize ");
+	outu(mem >> 20);
+	out(" MB  model ");
+	sysctl_str(6, 2);                       /* hw.model */
+	out("\n");
+}
+static void
+cmd_uptime(void)
+{
+	struct tv64 boot = { 0, 0, 0 };
+	sysctl2(1, 21, &boot, sizeof(boot));    /* kern.boottime */
+	long up = now_us() - (boot.sec * 1000000L + boot.usec);
+	out("up ");
+	outi(up / 1000000L);
+	out(".");
+	long ms = (up / 1000) % 1000;
+	if (ms < 100) {
+		out("0");
+	}
+	if (ms < 10) {
+		out("0");
+	}
+	outi(ms);
+	out(" s\n");
+}
+static void
+cmd_sleep(const char *arg)
+{
+	unsigned long s = arg ? atou(arg) : 1;
+	struct tv64 tv = { (long)s, 0, 0 };
+	long t0 = now_us();
+	long r = sys6(SYS_select, 0, 0, 0, 0, (long)&tv, 0);
+	long dt = now_us() - t0;
+	out("slept ");
+	outi(dt / 1000);
+	out(" ms (select ");
+	outi(r);
+	out(")\n");
+}
+static void
+cmd_ls(const char *path)
+{
+	long fd = sys3(SYS_open, path ? path : "/", O_RDONLY | O_DIRECTORY, 0);
+	if (fd < 0) {
+		out("ls: open error ");
+		outi(-fd);
+		out("\n");
+		return;
+	}
+	static char buf[4096];
+	long pos = 0, n, count = 0;
+	while ((n = sys6(SYS_getdirentries64, fd, (long)buf, sizeof(buf), (long)&pos, 0, 0)) > 0) {
+		for (long off = 0; off < n;) {
+			unsigned short reclen = *(unsigned short *)(buf + off + 16);
+			unsigned short namlen = *(unsigned short *)(buf + off + 18);
+			if (reclen == 0) {
+				break;
+			}
+			outn(buf + off + 21, namlen);
+			out(++count % 6 ? "  " : "\n");
+			off += reclen;
+		}
+	}
+	if (n < 0) {
+		out("ls: getdirentries64 error ");
+		outi(-n);
+	}
+	out("\n");
+	sys3(SYS_close, fd, 0, 0);
+}
+
+static void
+help(void)
+{
+	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | sleep N | help | exit [N]\n");
+}
+
+/* Run one command line (modified in place). */
+static void
+run(char *line)
+{
+	while (*line == ' ') {
+		line++;
+	}
+	if (!*line) {
+		return;
+	}
+	char *arg = line;
+	while (*arg && *arg != ' ') {
+		arg++;
+	}
+	if (*arg) {
+		*arg++ = 0;
+		while (*arg == ' ') {
+			arg++;
+		}
+	}
+	if (!*arg) {
+		arg = 0;
+	}
+	if (seq(line, "echo")) {
+		out(arg ? arg : "");
+		out("\n");
+	} else if (seq(line, "uname")) {
+		cmd_uname(arg);
+	} else if (seq(line, "hw")) {
+		cmd_hw();
+	} else if (seq(line, "pid")) {
+		out("pid ");
+		outi(sys3(SYS_getpid, 0, 0, 0));
+		out("  ppid ");
+		outi(sys3(SYS_getppid, 0, 0, 0));
+		out("\n");
+	} else if (seq(line, "uptime")) {
+		cmd_uptime();
+	} else if (seq(line, "ls")) {
+		cmd_ls(arg);
+	} else if (seq(line, "sleep")) {
+		cmd_sleep(arg);
+	} else if (seq(line, "help")) {
+		help();
+	} else if (seq(line, "exit")) {
+		out("fire_sh: exit\n");
+		sys3(SYS_exit, arg ? (long)atou(arg) : 0, 0, 0);
+	} else {
+		out("fire_sh: unknown command: ");
+		out(line);
+		out("\n");
+	}
+}
+
+/* One string, not an array of pointers: there is no dyld to apply pointer fixups in __DATA. */
+static const char script[] =
+    "help\n"
+    "echo DarwinFire shell: PID 1 on open-source XNU, Redmi 12 fire / MT6768\n"
+    "uname -a\n"
+    "hw\n"
+    "pid\n"
+    "uptime\n"
+    "ls /dev\n"
+    "sleep 2\n"
+    "uptime\n"
+    "echo script done\n";
+
 void cstart(void);
+/* LC_UNIXTHREAD enters with SP at argc, only 8-byte aligned; AArch64 faults on a misaligned SP. */
 __asm__(".globl _start\n"
     "_start:\n"
     "\tmov x9, sp\n"
@@ -53,19 +346,42 @@ __asm__(".globl _start\n"
 void
 cstart(void)
 {
-	long fd = sys3(SYS_open, (long)"/dev/console", O_WRONLY | O_NOCTTY, 0);
+	con = sys3(SYS_open, "/dev/console", O_RDWR | O_NOCTTY, 0);
+	out("\n**********************************************\n");
+	out("*  DarwinFire: hello from userland (PID 1)   *\n");
+	out("*  fire_sh v2 on open-source XNU, MT6768     *\n");
+	out("**********************************************\n\n");
 
-	say(fd, "\n**********************************************\n");
-	say(fd, "*  DarwinFire: hello from userland (PID 1)   *\n");
-	say(fd, "*  open-source XNU on Redmi 12 fire / MT6768 *\n");
-	say(fd, "**********************************************\n\n");
-	for (int i = 0; i < 5; i++) {
-		say(fd, "fire_init: still alive\n");
-		for (volatile unsigned long spin = 0; spin < 200000000ul; spin++) {
+	char line[256];
+	for (const char *p = script; *p;) {
+		size_t n = 0;
+		while (p[n] && p[n] != '\n' && n < sizeof(line) - 1) {
+			n++;
 		}
+		memcpy(line, p, n);
+		line[n] = 0;
+		p += n + (p[n] == '\n');
+		out("fire# ");
+		out(line);
+		out("\n");
+		run(line);
 	}
-	say(fd, "fire_init: exiting with 0x42 on purpose\n");
-	sys3(SYS_exit, 0x42, 0, 0);
+
 	for (;;) {
+		out("fire# ");
+		long n = sys3(SYS_read, con, line, sizeof(line) - 1);
+		if (n <= 0) {
+			out("\nfire_sh: console read returned ");
+			outi(n);
+			out(", exiting with 0x42\n");
+			sys3(SYS_exit, 0x42, 0, 0);
+		}
+		line[n] = 0;
+		for (long k = 0; k < n; k++) {
+			if (line[k] == '\n' || line[k] == '\r') {
+				line[k] = 0;
+			}
+		}
+		run(line);
 	}
 }

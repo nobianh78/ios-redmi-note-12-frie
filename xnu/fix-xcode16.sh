@@ -242,6 +242,9 @@ df_mark(int n)
  * same framebuffer into the kernel (TTBR1) and stores that address here; a second 10 MB io_map of
  * our own does not fit in the io space (kmem_alloc ... failed with 3). */
 volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+/* MT6768 TOPRGU watchdog, armed (31 s) by the heartbeat loader; mapped next to the framebuffer in
+ * initialize_screen(). Restarted on every console line: silence for 31 s (hang, panic) reboots. */
+volatile uint32_t *df_wdt;
 
 /* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
 void df_puts(const char *s, unsigned long caller);
@@ -313,6 +316,9 @@ df_cons_write(const char *s, int n)
 {
 	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, top = 1310, rows = (2030 - 1310) / 9, cols = 1080 / 8;
+	if (df_wdt) {
+		df_wdt[0x08 / 4] = 0x1971;   /* WDT_RST reload */
+	}
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	for (int i = 0; i < n; i++) {
 		char c = s[i];
@@ -455,7 +461,7 @@ vc_c="$(dirname "$arm_init")/../console/video_console.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
 perl -pi -e '
   if (!$a && /^\s+new_vinfo\.v_physaddr, new_vinfo\.v_width.*BRINGUP/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
-  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n\t\t\t\tif (newVideoVirt && new_vinfo.v_physaddr == 0x7ce6a000) { extern volatile uint32_t *df_fbva; df_fbva = (volatile uint32_t *)newVideoVirt; } /* fix-xcode16: fire log uses this kernel mapping */\n"; $b = 1; }
+  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n\t\t\t\tif (newVideoVirt && new_vinfo.v_physaddr == 0x7ce6a000) { extern volatile uint32_t *df_fbva; df_fbva = (volatile uint32_t *)newVideoVirt; extern volatile uint32_t *df_wdt; df_wdt = (volatile uint32_t *)ml_io_map(0x10007000, 0x4000); } /* fix-xcode16: fire log uses this kernel mapping */\n"; $b = 1; }
 ' "$vc_c"
 grep -q 'fire log uses this kernel mapping' "$vc_c" || { echo "fix-xcode16: df_fbva hook missing in video_console.c"; exit 1; }
 test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expected df_mark 11-12 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }

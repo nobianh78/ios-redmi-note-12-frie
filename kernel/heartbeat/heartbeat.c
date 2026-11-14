@@ -346,6 +346,17 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
 
     if (((uint64_t)exc_vectors & 0x7ff) == 0) __asm__ volatile("msr vbar_el1, %0; isb" :: "r"(exc_vectors));
     else { fbcon_puts("vectors misaligned: "); fbcon_hex((uint64_t)exc_vectors); fbcon_puts(" (no fault report)\n"); }
+
+    /* MT6768 TOPRGU watchdog (as Linux mtk_wdt.c): 31 s, reset on expiry. XNU restarts it on every
+     * console line, so a hang or panic reboots the phone; after the A/B retries LK falls back to slot a. */
+    {
+        volatile uint32_t *wdt = (volatile uint32_t *)0x10007000ull;
+        wdt[0x04 / 4] = ((31u << 6) << 5) | 0x8;                     /* WDT_LENGTH: timeout | key */
+        wdt[0x08 / 4] = 0x1971;                                        /* WDT_RST: reload */
+        wdt[0x00 / 4] = (wdt[0] & ~((1u << 3) | (1u << 6))) | 1u | 0x22000000u;   /* EN, no IRQ/dual, key */
+        __asm__ volatile("dsb sy" ::: "memory");
+        fbcon_puts("watchdog: 31s\n");
+    }
     xnu_jump(entry, ba_phys);
     return 1;   /* not reached */
 }

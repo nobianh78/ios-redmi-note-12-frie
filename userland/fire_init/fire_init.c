@@ -350,11 +350,72 @@ cmd_write(char *arg)
 	out(")\n");
 }
 
+/* ---- threads through libpthread's kernel part (P3): bsdthread_register + bsdthread_create ----
+ * The kernel starts each new thread at the registered entry with x0 = pthread, x1 = kernel port,
+ * x2 = function, x3 = argument, sp = our stack (PTHREAD_START_CUSTOM: we supply stack and pthread). */
+#define SYS_bsdthread_create    360
+#define SYS_bsdthread_terminate 361
+#define SYS_bsdthread_register  366
+#define PTHREAD_START_CUSTOM    0x01000000
+void df_thread_entry(void);
+__asm__(".globl _df_thread_entry\n"
+    "_df_thread_entry:\n"
+    "\tmov x19, x1\n"            /* kernel port of this thread */
+    "\tmov x0, x3\n"
+    "\tblr x2\n"                 /* func(arg) */
+    "\tmov x0, #0\n"             /* bsdthread_terminate(stack 0, size 0, port, sem 0) */
+    "\tmov x1, #0\n"
+    "\tmov x2, x19\n"
+    "\tmov x3, #0\n"
+    "\tmov x16, #361\n"
+    "\tsvc #0x80\n"
+    "1:\tb 1b\n");
+static volatile int thread_ran;
+static void
+thread_body(void *arg)
+{
+	out("  [thread] hello from a second thread, arg=");
+	outu((unsigned long)arg);
+	out("\n");
+	thread_ran = 1;
+}
+static void
+cmd_thread(void)
+{
+	static int registered;
+	static unsigned long stack[4096] __attribute__((aligned(16)));
+	static unsigned long pthread_buf[128] __attribute__((aligned(16)));
+	if (!registered) {
+		long r = sys6(SYS_bsdthread_register, (long)df_thread_entry, (long)df_thread_entry, sizeof(pthread_buf), 0, 0, 0);
+		out("bsdthread_register: ");
+		outi(r);
+		out("\n");
+		if (r < 0) {
+			return;
+		}
+		registered = 1;
+	}
+	thread_ran = 0;
+	long r = sys6(SYS_bsdthread_create, (long)thread_body, 42, (long)(stack + 4096), (long)pthread_buf,
+	    PTHREAD_START_CUSTOM, 0);
+	out("bsdthread_create: ");
+	outi(r < 0 ? r : 0);
+	out("\n");
+	if (r < 0) {
+		return;
+	}
+	struct tv64 tv = { 0, 200000, 0 };
+	for (int i = 0; i < 10 && !thread_ran; i++) {
+		sys6(SYS_select, 0, 0, 0, 0, (long)&tv, 0);
+	}
+	out(thread_ran ? "thread: ok, the second thread ran\n" : "thread: the second thread did not run within 2 s\n");
+}
+
 static void
 help(void)
 {
 	out("commands: echo TEXT | uname [-a] | hw | pid | uptime | ls [DIR] | cat FILE | write FILE TEXT |"
-	    " mkdir DIR | remount | sleep N | help | exit [N]\n");
+	    " mkdir DIR | remount | thread | sleep N | help | exit [N]\n");
 }
 
 /* Run one command line (modified in place). */
@@ -401,6 +462,8 @@ run(char *line)
 		cmd_cat(arg);
 	} else if (seq(line, "write")) {
 		cmd_write(arg);
+	} else if (seq(line, "thread")) {
+		cmd_thread();
 	} else if (seq(line, "remount")) {
 		/* the kernel mounts root read-only (EROFS on write); launchd normally does `mount -uw /` */
 		/* HFS copyin()s a struct hfs_mount_args even for an update (NULL gave EFAULT); all-zero
@@ -445,6 +508,7 @@ static const char script[] =
     "mkdir /tmp/newdir\n"
     "ls /tmp\n"
     "cat /tmp/hello.txt\n"
+    "thread\n"
     "sleep 2\n"
     "uptime\n"
     "echo script done\n";

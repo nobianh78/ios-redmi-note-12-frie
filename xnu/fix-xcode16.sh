@@ -246,6 +246,63 @@ volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
  * initialize_screen(). Restarted on every console line: silence for 31 s (hang, panic) reboots. */
 volatile uint32_t *df_wdt;
 
+/* Console log into the Android ramoops console zone, so the next Android boot (slot a, after the
+ * watchdog reset) shows it as /sys/fs/pstore/console-ramoops-0. Stock params (/sys/module/ramoops):
+ * mem 0x4d010000 +0xe0000, record 4K, console 256K, ftrace 4K, pmsg 64K, ecc 0 -> dmesg zones take
+ * 0xe0000-0x40000-0x1000-0x10000 = 0x8f000, so the console zone is at 0x4d09f000. It lies above the
+ * 128 MB XNU manages. Layout = Linux struct persistent_ram_buffer { u32 sig; u32 start; u32 size; data }. */
+#define DF_PS_PA    0x4d09f000UL
+#define DF_PS_ZONE  0x40000U
+#define DF_PS_DATA  (DF_PS_ZONE - 12U)
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+static volatile uint8_t *df_ps;
+static char df_ps_early[65536];      /* log written before the zone is mapped */
+static unsigned df_ps_early_n;
+static void
+df_ps_put(char c)
+{
+	if (!df_ps) {
+		if (df_ps_early_n < sizeof(df_ps_early)) {
+			df_ps_early[df_ps_early_n++] = c;
+		}
+		return;
+	}
+	volatile uint32_t *h = (volatile uint32_t *)df_ps;
+	uint32_t start = h[1], size = h[2];
+	df_ps[12 + start] = (uint8_t)c;
+	h[1] = (start + 1) % DF_PS_DATA;
+	h[2] = size < DF_PS_DATA ? size + 1 : size;
+}
+static void
+df_ps_puts(const char *s)
+{
+	while (*s) {
+		df_ps_put(*s++);
+	}
+}
+/* Called from initialize_screen() once kmem can io_map. Device memory: writes reach DRAM directly. */
+void df_ps_attach(void);
+void
+df_ps_attach(void)
+{
+	if (df_ps) {
+		return;
+	}
+	volatile uint8_t *p = (volatile uint8_t *)ml_io_map(DF_PS_PA, DF_PS_ZONE);
+	if (!p) {
+		return;
+	}
+	volatile uint32_t *h = (volatile uint32_t *)p;
+	h[0] = 0x43474244;   /* PERSISTENT_RAM_SIG "DBGC" */
+	h[1] = 0;
+	h[2] = 0;
+	df_ps = p;
+	df_ps_puts("==== DarwinFire XNU console (written by XNU, read back by Android pstore) ====\n");
+	for (unsigned i = 0; i < df_ps_early_n; i++) {
+		df_ps_put(df_ps_early[i]);
+	}
+}
+
 /* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
 void df_puts(const char *s, unsigned long caller);
 void
@@ -260,6 +317,11 @@ df_puts(const char *s, unsigned long caller)
 		hex[9 + i] = "0123456789abcdef"[(caller >> (60 - 4 * i)) & 0xf];
 	}
 	hex[25] = 0;
+	df_ps_puts("\n");
+	df_ps_puts(s);
+	df_ps_puts("\n");
+	df_ps_puts(hex);
+	df_ps_puts("\n");
 	for (unsigned y = top; y < bottom; y++) {
 		for (unsigned x = 0; x < 1080; x++) {
 			fb[y * pitch + x] = 0xff000000;
@@ -322,6 +384,7 @@ df_cons_write(const char *s, int n)
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	for (int i = 0; i < n; i++) {
 		char c = s[i];
+		df_ps_put(c);
 		if (c == '\n' || df_con_col == cols) {
 			df_con_col = 0;
 			df_con_row = (df_con_row + 1) % rows;
@@ -461,7 +524,7 @@ vc_c="$(dirname "$arm_init")/../console/video_console.c"
 perl -0pi -e 's|^|extern void df_mark(int); /* fix-xcode16: fire bring-up breadcrumbs */\n|' "$vc_c"
 perl -pi -e '
   if (!$a && /^\s+new_vinfo\.v_physaddr, new_vinfo\.v_width.*BRINGUP/) { $_ .= "\t\t\tdf_mark(11);\n"; $a = 1; }
-  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n\t\t\t\tif (newVideoVirt && new_vinfo.v_physaddr == 0x7ce6a000) { extern volatile uint32_t *df_fbva; df_fbva = (volatile uint32_t *)newVideoVirt; extern volatile uint32_t *df_wdt; df_wdt = (volatile uint32_t *)ml_io_map(0x10007000, 0x4000); } /* fix-xcode16: fire log uses this kernel mapping */\n"; $b = 1; }
+  elsif (!$b && /^\t+newVideoVirt = ml_io_map_unmappable\(/) { $_ .= "\t\t\t\tdf_mark(12);\n\t\t\t\tif (newVideoVirt && new_vinfo.v_physaddr == 0x7ce6a000) { extern volatile uint32_t *df_fbva; df_fbva = (volatile uint32_t *)newVideoVirt; extern volatile uint32_t *df_wdt; df_wdt = (volatile uint32_t *)ml_io_map(0x10007000, 0x4000); extern void df_ps_attach(void); df_ps_attach(); } /* fix-xcode16: fire log uses this kernel mapping */\n"; $b = 1; }
 ' "$vc_c"
 grep -q 'fire log uses this kernel mapping' "$vc_c" || { echo "fix-xcode16: df_fbva hook missing in video_console.c"; exit 1; }
 test "$(grep -c 'df_mark(1[1-2]);' "$vc_c")" -eq 2 || { echo "fix-xcode16: expected df_mark 11-12 in video_console.c"; grep -n df_mark "$vc_c"; exit 1; }

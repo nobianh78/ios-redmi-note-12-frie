@@ -136,7 +136,8 @@ dfe_dma_read(uint32_t lba, uint32_t n)
 	}
 	dfe_w(E_DMA_SA, dfe_dma_pa);
 	dfe_w(E_DMA_LEN, len);
-	dfe_w(E_DMA_CTRL, (dfe_r(E_DMA_CTRL) & ~((1u << 8) | (7u << 12))) | (1u << 10) | (6u << 12)); /* basic, 64 B bursts */
+	/* basic mode, 64 B bursts; clear start/stop: the stop bit stays set after a transfer and would block the next one */
+	dfe_w(E_DMA_CTRL, (dfe_r(E_DMA_CTRL) & ~(3u | (1u << 8) | (7u << 12))) | (1u << 10) | (6u << 12));
 	dfe_w(E_BLK_NUM, n);
 	int rc = dfe_cmd(n > 1 ? 18 : 17, lba, (n > 1 ? (2u << 11) | (1u << 28) : (1u << 11)) | (512u << 16), &r1);
 	if (rc == 0) {
@@ -206,24 +207,27 @@ dfe_dma_init(uint32_t bench_lba)
 		return;
 	}
 	dfe_dma_pa = (uint32_t)pa;
-	int rc = dfe_dma_read(0, 64);                       /* LBA 0-63: protective MBR, GPT, entries */
-	if (rc) {
-		printf("emmc: DMA test read failed %d (int %x, dma cfg %x), staying on PIO\n", rc, dfe_r(E_INT), dfe_r(E_DMA_CFG));
-		return;
-	}
-	for (uint32_t b = 0; b < 64; b++) {
-		if (df_emmc_read(b, dfe_blk)) {
-			printf("emmc: PIO compare read failed at %u\n", b);
+	/* two transfers back to back, both checked against PIO: a DMA that only works once must fail here */
+	int rc = 0;
+	for (uint32_t base = 0; base < 128 && !rc; base += 64) {
+		if ((rc = dfe_dma_read(base, 64))) {
+			printf("emmc: DMA test read at %u failed %d (int %x, dma cfg %x), staying on PIO\n", base, rc,
+			    dfe_r(E_INT), dfe_r(E_DMA_CFG));
 			return;
 		}
-		for (int i = 0; i < 512; i++) {
-			if (dfe_blk[i] != dfe_dma_buf[b * 512 + i]) {
-				printf("emmc: DMA/PIO mismatch at LBA %u byte %d, staying on PIO\n", b, i);
+		for (uint32_t b = 0; b < 64; b++) {
+			if (df_emmc_read(base + b, dfe_blk)) {
+				printf("emmc: PIO compare read failed at %u\n", base + b);
 				return;
 			}
+			for (int i = 0; i < 512; i++) {
+				if (dfe_blk[i] != dfe_dma_buf[b * 512 + i]) {
+					printf("emmc: DMA/PIO mismatch at LBA %u byte %d, staying on PIO\n", base + b, i);
+					return;
+				}
+			}
 		}
-	}
-	/* speed: 16 MB by DMA vs 1 MB by PIO, both from bench_lba */
+	}	/* speed: 16 MB by DMA vs 1 MB by PIO, both from bench_lba */
 	uint64_t t0 = mach_absolute_time();
 	for (uint32_t i = 0; i < 256 && !rc; i++) {
 		rc = dfe_dma_read(bench_lba + i * DFE_DMA_BLKS, DFE_DMA_BLKS);

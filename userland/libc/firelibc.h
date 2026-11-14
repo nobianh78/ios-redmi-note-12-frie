@@ -60,6 +60,8 @@ const char *strerror(int e);
 int printf(const char *fmt, ...);
 int dprintf(int fd, const char *fmt, ...);
 int puts(const char *s);
+int snprintf(char *buf, size_t cap, const char *fmt, ...);
+void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *));
 char *getenv(const char *name);
 
 /* memory (mmap-backed; shortcut: first-fit free list, no coalescing; fine for small tools) */

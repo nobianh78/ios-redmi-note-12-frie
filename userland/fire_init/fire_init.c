@@ -453,6 +453,9 @@ cmd_run(char *arg)
 		return;
 	}
 	if (x1) {               /* child */
+		/* own session with the console as controlling tty, so dash gets job control (Ctrl-C, &, fg) */
+		sys3(147 /* setsid */, 0, 0, 0);
+		sys3(54 /* ioctl */, 0, 0x20007461 /* TIOCSCTTY */, 0);
 		long r = sys3(SYS_execve, argv[0], argv, envp);
 		out("run: execve error ");
 		outi(-r);

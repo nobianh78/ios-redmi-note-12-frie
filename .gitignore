@@ -6,6 +6,11 @@ extracted_binaries/
 *.ipsw
 *.im4p
 *.tgz
+*.img
+*.simg
+*.dmg
+*.raw
+ios1/
 
 # Local tool checkouts / drivers (not part of this project)
 rea/

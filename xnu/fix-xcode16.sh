@@ -521,6 +521,15 @@ cat "$(dirname "$0")/df_emmc.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
 grep -q '^df_emmc_probe(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_emmc.c not appended"; exit 1; }
 cat "$(dirname "$0")/df_emmc_dev.c" >> "$src/bsd/dev/memdev.c"
 grep -q '^df_emmc_devinit(void)' "$src/bsd/dev/memdev.c" || { echo "fix-xcode16: df_emmc_dev.c not appended"; exit 1; }
+#        P6: HFS+ root straight from the eMMC "super" partition (read-only block device, df_emmc_dev.c).
+#        setconf asks df_emmc_rootdev() after IOFindBSDRoot; with no HFS+ on super it returns NODEV and
+#        the rd=md0 RAMDisk stays root, so a bad or missing image still boots to fire_sh.
+perl -0pi -e 's|(strlcpy\(rootdevice, "sd0a", sizeof\(rootdevice\)\);\n\t\tflags = 0;\n\t\}\n)|$1\t{ /* fix-xcode16 P6: HFS+ root on eMMC super */\n\t\textern dev_t df_emmc_rootdev(void);\n\t\tdev_t df_root = df_emmc_rootdev();\n\t\tif (df_root != NODEV) {\n\t\t\trootdev = df_root;\n\t\t\tstrlcpy(rootdevice, "emmc_super", sizeof(rootdevice));\n\t\t\tflags = 0;\n\t\t}\n\t}\n|' "$src/bsd/kern/bsd_init.c"
+grep -q 'P6: HFS+ root on eMMC super' "$src/bsd/kern/bsd_init.c" || { echo "fix-xcode16: setconf eMMC root hook missing"; grep -n -A12 '^setconf' "$src/bsd/kern/bsd_init.c"; exit 1; }
+#        P6: PID 1 is the dynamic /sbin/launchd (loaded through /usr/lib/dyld); if it is missing or its exec
+#        fails, fall back to the static /sbin/fire_init so the console shell still comes up.
+perl -0pi -e 's|(\t"/sbin/launchd",\n)(\};)|$1\t"/sbin/fire_init", /* fix-xcode16 P6: static fallback */\n$2|' "$src/bsd/kern/kern_exec.c"
+grep -q 'P6: static fallback' "$src/bsd/kern/kern_exec.c" || { echo "fix-xcode16: init_programs fallback missing"; exit 1; }
 #        kmputc dropped every 1-byte console write (single digits, tty echo): always pass it on.
 km_c="$src/bsd/dev/arm/km.c"
 perl -0pi -e 's|(\nkmputc\(__unused dev_t dev, char c\)\n\{\n)\tif \(!disableConsoleOutput && initialized\) \{|$1\tif (1) { /* fix-xcode16: fire has no other console, never drop 1-byte writes */|' "$km_c"

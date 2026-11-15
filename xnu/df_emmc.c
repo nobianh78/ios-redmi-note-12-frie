@@ -278,6 +278,8 @@ dfe_dma_init(uint32_t bench_lba)
 	    dfe_dma_rst, dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
 }
 uint64_t df_emmc_sectors;                       /* from the GPT header; /dev/emmc size */
+uint64_t df_emmc_super_lba, df_emmc_super_blocks;   /* GPT "super" partition (P6 HFS+ root) */
+static int dfe_probed;
 static uint64_t
 dfe_le(const uint8_t *p, int n)
 {
@@ -293,6 +295,9 @@ void
 df_emmc_probe(void)
 {
 	uint32_t r1 = 0;
+	if (dfe_probed++) {
+		return;                                     /* runs before setconf (P6) and is idempotent */
+	}
 	dfe = (volatile uint8_t *)ml_io_map(DFE_BASE, 0x1000);
 	dfe_w(E_INTEN, 0);                                  /* polled: no MSDC IRQ */
 	dfe_w(E_CFG, dfe_r(E_CFG) | (1u << 3));             /* PIO */
@@ -332,5 +337,9 @@ df_emmc_probe(void)
 		}
 		name[36] = 0;
 		printf("emmc: p%-3u %-16s LBA %8llu  %6llu MB\n", i + 1, name, a, (b - a + 1) >> 11);
+		if (!__builtin_strcmp(name, "super")) {
+			df_emmc_super_lba = a;
+			df_emmc_super_blocks = b - a + 1;
+		}
 	}
 }

@@ -299,8 +299,11 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     ba->video.v_depth    = 32;
     ba->deviceTreeP      = adt_phys - phys_base + p->virt_base;   /* XNU reads the ADT through its kernel VA */
     ba->deviceTreeLength = (uint32_t)p->adt_size;
-    /* -v: verbose console. rd=md0: root on the /chosen/memory-map RAMDisk (mockfs serves it as /sbin/launchd). */
-    const char *cmd = "-v rd=md0";
+    /* -v: verbose console. rd=md0: the /chosen/memory-map RAMDisk; since P6 only the fallback root, used when
+     * the eMMC "super" partition has no HFS+ volume (setconf, df_emmc_rootdev). The rest are the
+     * development flags for the dynamic userland (no AMFI kext is loaded, so the amfi_* ones are inert). */
+    const char *cmd = "-v rd=md0 cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi_allow_any_signature=1"
+                      " ipc_control_port_options=0";
     /* Byte stores through volatile: with the MMU off all memory is Device, and clang merged this loop
      * into an unaligned 8-byte store (CommandLine sits at +0x6c), which faulted and hung the loader. */
     volatile char *cl = ba->CommandLine;

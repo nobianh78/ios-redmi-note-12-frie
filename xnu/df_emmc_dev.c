@@ -82,6 +82,116 @@ static const struct cdevsw dfe_cdevsw = {
 	.d_type       = 0,
 };
 
+/* ---- P6: READ-ONLY block device over the GPT "super" partition, the HFS+ root ----
+ * Device block = 512 bytes, block 0 = first LBA of super. Opening for write fails (EROFS) and the
+ * strategy routine fails every non-read buffer with EROFS, so the root stays read-only: a remount
+ * read-write is refused here instead of reaching the card. */
+extern uint64_t df_emmc_super_lba, df_emmc_super_blocks;
+extern void df_emmc_probe(void);
+extern int df_emmc_read(uint32_t lba, void *buf);
+static int dfe_bmajor = -1;
+
+static int
+dfe_bdev_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
+{
+	return (flags & FWRITE) ? EROFS : 0;
+}
+
+static void
+dfe_bdev_strategy(buf_t bp)
+{
+	uint64_t blk = (uint64_t)buf_blkno(bp);
+	uint32_t count = buf_count(bp);
+	caddr_t va = 0;
+	int err = 0;
+	if (!(buf_flags(bp) & B_READ)) {
+		err = EROFS;
+	} else if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
+		err = EINVAL;
+	} else if ((err = buf_map(bp, &va)) == 0) {
+		lck_mtx_lock(&dfe_mtx);
+		if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), count >> 9, va)) {
+			err = EIO;
+		}
+		lck_mtx_unlock(&dfe_mtx);
+		buf_unmap(bp);
+	}
+	if (err) {
+		printf("emmc: super blk %llu len %u: error %d\n", blk, count, err);
+		buf_seterror(bp, err);
+		buf_setresid(bp, count);
+	} else {
+		buf_setresid(bp, 0);
+	}
+	buf_biodone(bp);
+}
+
+static int
+dfe_bdev_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
+{
+	switch (cmd) {
+	case DKIOCGETBLOCKSIZE:
+	case DKIOCGETPHYSICALBLOCKSIZE:
+		*(uint32_t *)data = 512;
+		return 0;
+	case DKIOCGETBLOCKCOUNT:
+		*(uint64_t *)data = df_emmc_super_blocks;
+		return 0;
+	case DKIOCISWRITABLE:
+		*(uint32_t *)data = 0;
+		return 0;
+	case DKIOCGETFEATURES:
+		*(uint32_t *)data = 0;
+		return 0;
+	default:
+		return ENOTTY;
+	}
+}
+
+static int
+dfe_bdev_psize(__unused dev_t dev)
+{
+	return (int)(df_emmc_super_blocks > 0x7fffffff ? 0x7fffffff : df_emmc_super_blocks);
+}
+
+static const struct bdevsw dfe_bdevsw = {
+	.d_open     = dfe_bdev_open,
+	.d_close    = dfe_dev_close,
+	.d_strategy = dfe_bdev_strategy,
+	.d_ioctl    = dfe_bdev_ioctl,
+	.d_dump     = eno_dump,
+	.d_psize    = dfe_bdev_psize,
+	.d_type     = D_DISK,
+};
+
+/* Called from setconf, after IOFindBSDRoot: if "super" holds an HFS+/HFSX volume (signature "H+"/"HX"
+ * at byte 1024), it becomes the root device; otherwise NODEV and the RAMDisk (rd=md0) stays root. */
+dev_t df_emmc_rootdev(void);
+dev_t
+df_emmc_rootdev(void)
+{
+	df_emmc_probe();
+	if (!df_emmc_super_blocks) {
+		printf("emmc: no super partition, root stays on the RAMDisk\n");
+		return NODEV;
+	}
+	lck_mtx_lock(&dfe_mtx);
+	int rc = df_emmc_read((uint32_t)df_emmc_super_lba + 2, dfe_dev_buf);
+	lck_mtx_unlock(&dfe_mtx);
+	if (rc || !(dfe_dev_buf[0] == 'H' && (dfe_dev_buf[1] == '+' || dfe_dev_buf[1] == 'X'))) {
+		printf("emmc: super has no HFS+ volume header (rc %d, %02x %02x), root stays on the RAMDisk\n", rc,
+		    dfe_dev_buf[0], dfe_dev_buf[1]);
+		return NODEV;
+	}
+	if (dfe_bmajor < 0 && (dfe_bmajor = bdevsw_add(-1, &dfe_bdevsw)) < 0) {
+		printf("emmc: bdevsw_add failed %d, root stays on the RAMDisk\n", dfe_bmajor);
+		return NODEV;
+	}
+	printf("emmc: HFS+ on super (LBA %llu, %llu MB): root = block device %d,0 (read-only)\n",
+	    df_emmc_super_lba, df_emmc_super_blocks >> 11, dfe_bmajor);
+	return makedev(dfe_bmajor, 0);
+}
+
 void df_emmc_devinit(void);
 void
 df_emmc_devinit(void)
@@ -96,4 +206,7 @@ df_emmc_devinit(void)
 		return;
 	}
 	printf("emmc: /dev/emmc ready (read-only, %llu sectors)\n", df_emmc_sectors);
+	if (dfe_bmajor >= 0) {
+		devfs_make_node(makedev(dfe_bmajor, 0), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0440, "emmc_super");
+	}
 }

@@ -131,23 +131,29 @@ void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv);
 void
 df_sc_note(int code, uint64_t arg0, int err, uint64_t rv)
 {
-	int k = dfe_sc_i++ % DFE_SC_N;
+	static char p[256];
 	size_t l = 0;
+	p[0] = 0;
+	if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
+		if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
+			strlcpy(p, "<copyinstr failed>", sizeof(p));
+		} else if (!strstr(p, "dyld") && !strstr(p, "Cryptex") && !strstr(p, "Caches")) {
+			return;
+		}
+	}
+	int k = dfe_sc_i++ % DFE_SC_N;
+	size_t n = strlen(p);
 	dfe_sc[k].code = code;
 	dfe_sc[k].err = err;
 	dfe_sc[k].rv = rv;
-	dfe_sc[k].path[0] = 0;
-	if (code == 5 || code == 338 || code == 339 || code == 340 || code == 463) {     /* open, stat64, fstat64?, lstat64, openat */
-		if (copyinstr((user_addr_t)arg0, dfe_sc[k].path, sizeof(dfe_sc[k].path) - 1, &l)) {
-			dfe_sc[k].path[0] = 0;
-		}
-	}
+	strlcpy(dfe_sc[k].path, n > 56 ? p + n - 56 : p, sizeof(dfe_sc[k].path));   /* the tail names the file */
 }
 void df_sc_dump(void);
 void
 df_sc_dump(void)
 {
 	int n = dfe_sc_i < DFE_SC_N ? dfe_sc_i : DFE_SC_N;
+	printf("sc total %d (cache-related)\n", dfe_sc_i);
 	for (int j = 0; j < n; j++) {
 		int k = (dfe_sc_i - n + j) % DFE_SC_N;
 		printf("sc %d err %d rv 0x%llx %s\n", dfe_sc[k].code, dfe_sc[k].err, dfe_sc[k].rv, dfe_sc[k].path);

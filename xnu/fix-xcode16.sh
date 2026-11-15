@@ -1131,6 +1131,9 @@ grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic 
 sleh_c="$src/osfmk/arm64/sleh.c"
 perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
+#        Log EL0 exceptions (SVC = syscalls of PID 1, aborts = its faults)
+perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && df_n < 50) { df_n++; printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); } } /* fix-xcode16 */\n|' "$sleh_c"
+grep -q 'fire el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
 #        Bring-up traces of the launchd exec / first-syscall hangs (EL0 trap, exec steps, process_signature,
 #        SVC path, open path, mockfs vnops) are gone: the fixes they led to are the AMFI guards below and the
 #        console_write early return. Kept: the execve result line.
@@ -1144,6 +1147,13 @@ perl -0pi -e 's|(df_usb_start\(\); \} /\* fix-xcode16 \*/\n)|$1\t{ extern void d
 grep -q 'df_emmc_probe(); } /\* fix-xcode16 P5' "$exec_c" || { echo "fix-xcode16: df_emmc_probe hook missing"; exit 1; }
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire: /sbin/launchd execve' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
+perl -0pi -e 's|(\t+error = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, init_programs\[i\]\);\n)|$1\t\t\tprintf("fire: %s execve -> %d\\n", init_programs[i], error); /* fix-xcode16 */\n|' "$exec_c"
+grep -q 'fire: %s execve' "$exec_c" || { echo "fix-xcode16: loop execve result log not inserted"; exit 1; }
+perl -pi -e 'if (/^\t\terror = \(\*execsw\[i\]\.ex_imgact\)\(imgp\);/) { $_ = "\t\tprintf(\"fire spawn: %s (pid %d)\\n\", imgp->ip_strings ? imgp->ip_strings : \"?\", p->p_pid);\n$_"; }' "$exec_c"
+grep -q 'fire spawn:' "$exec_c" || { echo "fix-xcode16: spawn log not inserted"; exit 1; }
+sc_arm="$src/bsd/dev/arm/systemcalls.c"
+perl -0pi -e 's|(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)|\n\tstatic int df_sc; int df_sc_on = df_sc++ < 80; /* fix-xcode16 */\n\tif (df_sc_on) { printf("fire sys %d pid %d >\\n", code, pid); }\n\tif (code == 4 && (uthread->uu_arg[0] == 1 \|\| uthread->uu_arg[0] == 2)) {\n\t\textern int copyin(const user_addr_t, void *, vm_size_t);\n\t\tchar df_kb[128]; size_t df_kl = (size_t)uthread->uu_arg[2]; if (df_kl > sizeof(df_kb) - 1) df_kl = sizeof(df_kb) - 1;\n\t\tif (copyin(uthread->uu_arg[1], df_kb, df_kl) == 0) { df_kb[df_kl] = 0; printf("[out#%d] %s\\n", (int)uthread->uu_arg[0], df_kb); }\n\t}$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n|' "$sc_arm"
+grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
 #        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,
 #        no process has entitlements: answer "not entitled" instead of calling through NULL.

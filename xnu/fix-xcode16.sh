@@ -289,17 +289,23 @@ df_trace(const char *s)
 	df_ps_puts(s);
 	df_ps_put('\n');
 }
-/* fire diag: pstore header as XNU sees it (printed via printf, so it also reaches the screen) */
+/* fire diag: pstore header as XNU sees it (no printf in this file: hex by hand, straight into pstore) */
 void df_ps_hdr(void);
 void
 df_ps_hdr(void)
 {
-	if (df_ps) {
-		volatile uint32_t *h = (volatile uint32_t *)df_ps;
-		printf("fire pstore hdr sig %x start %u size %u va %p\n", h[0], h[1], h[2], df_ps);
-	} else {
-		printf("fire pstore not attached (early %u)\n", df_ps_early_n);
+	char b[64] = "fire pstore hdr start 0x00000000 size 0x00000000\n";
+	if (!df_ps) {
+		return;
 	}
+	volatile uint32_t *h = (volatile uint32_t *)df_ps;
+	uint32_t v[2] = { h[1], h[2] };
+	for (int k = 0; k < 2; k++) {
+		for (int i = 0; i < 8; i++) {
+			b[24 + k * 16 + i] = "0123456789abcdef"[(v[k] >> (28 - 4 * i)) & 0xf];
+		}
+	}
+	df_ps_puts(b);
 }
 /* Called from initialize_screen() once kmem can io_map. Device memory: writes reach DRAM directly. */
 void df_ps_attach(void);

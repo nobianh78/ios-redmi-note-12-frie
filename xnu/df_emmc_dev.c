@@ -97,6 +97,18 @@ dfe_bdev_open(__unused dev_t dev, int flags, __unused int devtype, __unused stru
 	return (flags & FWRITE) ? EROFS : 0;
 }
 
+/* fire diag: dyld reads happen at exec, long before the fault scrolls them off; keep them for the fault trace */
+static uint32_t dfe_dyld_off[32], dfe_dyld_len[32];
+static int dfe_dyld_n;
+void df_emmc_dyld_dump(void);
+void
+df_emmc_dyld_dump(void)
+{
+	for (int i = 0; i < dfe_dyld_n; i++) {
+		printf("emmc dyld rd#%d off=0x%x len=0x%x\n", i, dfe_dyld_off[i], dfe_dyld_len[i]);
+	}
+}
+
 static void
 dfe_bdev_strategy(buf_t bp)
 {
@@ -110,8 +122,9 @@ dfe_bdev_strategy(buf_t bp)
 		err = EINVAL;
 	} else if ((err = buf_map(bp, &va)) == 0) {
 		/* fire diag: reads touching /usr/lib/dyld (HFS block 2094448 = sector 16755584, 1811 sectors) */
-		if (blk < 16755584ull + 1811 && blk + (count >> 9) > 16755584ull) {
-			printf("emmc dyld rd off=0x%llx len=0x%x\n", (blk - 16755584ull) << 9, count);
+		if (blk < 16755584ull + 1811 && blk + (count >> 9) > 16755584ull && dfe_dyld_n < 32) {
+			dfe_dyld_off[dfe_dyld_n] = (uint32_t)((blk - 16755584ull) << 9);
+			dfe_dyld_len[dfe_dyld_n++] = count;
 		}
 		lck_mtx_lock(&dfe_mtx);
 		if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), count >> 9, va)) {

@@ -1184,12 +1184,15 @@ grep -q 'if (amfi == NULL) { return 0; }' "$ubc_c" || { echo "fix-xcode16: amfi 
 perl -pi -e 's@amfi->OSEntitlements_invalidate\(blob->csb_entitlements\);@if (amfi != NULL) { amfi->OSEntitlements_invalidate(blob->csb_entitlements); } /* fix-xcode16 */@' "$ubc_c"
 grep -q 'if (amfi != NULL) { amfi->OSEntitlements_invalidate' "$ubc_c" || { echo "fix-xcode16: amfi OSEntitlements_invalidate guard missing"; exit 1; }
 perl -pi -e 's@ret = amfi->OSEntitlements\.@ret = (amfi == NULL) ? KERN_SUCCESS : amfi->OSEntitlements.@' "$ubc_c"
-#        kern_proc.c: fallback directly to csb_entitlements_blob and csb_der_entitlements_blob without AMFI
+#        ubc_subr.c: return embedded entitlements without AMFI verification
+perl -0pi -e 's@(\ncsblob_get_entitlements\([^{]*\{\n)@${1}\tif (csblob && csblob->csb_entitlements_blob) { if (out_start) *out_start = (void *)csblob->csb_entitlements_blob; if (out_length) *out_length = (size_t)ntohl(((CS_GenericBlob *)csblob->csb_entitlements_blob)->length); return 0; } /* fix-xcode16 */\n@' "$ubc_c"
+grep -q 'csblob->csb_entitlements_blob) {' "$ubc_c" || { echo "fix-xcode16: csblob_get_entitlements patch missing"; exit 1; }
+perl -0pi -e 's@(\ncsblob_get_der_entitlements\([^{]*\{\n)@${1}\tif (csblob && csblob->csb_der_entitlements_blob) { if (out_start) *out_start = (const CS_GenericBlob *)csblob->csb_der_entitlements_blob; if (out_length) *out_length = (size_t)ntohl(((const CS_GenericBlob *)csblob->csb_der_entitlements_blob)->length); return 0; } /* fix-xcode16 */\n@' "$ubc_c"
+grep -q 'csblob->csb_der_entitlements_blob) {' "$ubc_c" || { echo "fix-xcode16: csblob_get_der_entitlements patch missing"; exit 1; }
+#        kern_proc.c: fallback to csblob_get_entitlements for CS_OPS_ENTITLEMENTS_BLOB
 proc_c="$src/bsd/kern/kern_proc.c"
-perl -pi -e 's@void\* osent = csblob_os_entitlements_get\(blob\);@if (blob->csb_entitlements_blob) { start = (void *)blob->csb_entitlements_blob; length = (size_t)ntohl(((CS_GenericBlob *)start)->length); error = csops_copy_token(start, length, usize, uaddr); goto out; } /* fix-xcode16 */\n\t\t$&@' "$proc_c"
-grep -q 'blob->csb_entitlements_blob' "$proc_c" || { echo "fix-xcode16: CS_OPS_ENTITLEMENTS_BLOB patch missing"; exit 1; }
-perl -pi -e 's@error = csblob_get_der_entitlements\(blob, \(const CS_GenericBlob \*\*\)&start, &length\);@if (blob->csb_der_entitlements_blob) { start = (const void *)blob->csb_der_entitlements_blob; length = (size_t)ntohl(((const CS_GenericBlob *)start)->length); error = csops_copy_token(start, length, usize, uaddr); goto out; } /* fix-xcode16 */\n\t\t$&@' "$proc_c"
-grep -q 'blob->csb_der_entitlements_blob' "$proc_c" || { echo "fix-xcode16: CS_OPS_DER_ENTITLEMENTS_BLOB patch missing"; exit 1; }
+perl -pi -e 's@void\* osent = csblob_os_entitlements_get\(blob\);@if (csblob_get_entitlements(blob, &start, &length) == 0) { error = csops_copy_token(start, length, usize, uaddr); goto out; } /* fix-xcode16 */\n\t\t$&@' "$proc_c"
+grep -q 'csblob_get_entitlements(blob' "$proc_c" || { echo "fix-xcode16: kern_proc CS_OPS_ENTITLEMENTS_BLOB patch missing"; exit 1; }
 perl -pi -e 's@if \(amfi->OSEntitlements_get_xml@if (amfi != NULL && amfi->OSEntitlements_get_xml@' "$proc_c"
 grep -q 'if (amfi != NULL && amfi->OSEntitlements_get_xml' "$proc_c" || { echo "fix-xcode16: kern_proc amfi get_xml guard missing"; exit 1; }
 #        kern_mib.c: fallback HW_TARGET & HW_PRODUCT for iOS launchd

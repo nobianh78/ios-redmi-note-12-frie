@@ -125,7 +125,7 @@ df_dyld_sums(void)
 
 /* fire diag: last path/shared-region syscalls of PID 1, printed at its exit (the live trace scrolls away) */
 #define DFE_SC_N 24
-static struct { int code, err; uint64_t rv; char path[80]; } dfe_sc[DFE_SC_N];
+static struct { int code, err; uint64_t rv; char path[112]; } dfe_sc[DFE_SC_N];
 static int dfe_sc_i;
 void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_t arg3);
 void
@@ -134,7 +134,19 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	static char p[256];
 	size_t l = 0;
 	p[0] = 0;
-	if (code == 339) {                                  /* fstat64(fd, struct stat64 *): dev, mode, nlink, ino */
+	if (code == 220) {                                  /* getattrlist(path, alist, buf, size): show path + reply */
+		char q[48] = {0};
+		uint8_t r[24] = {0};
+		if (copyinstr((user_addr_t)arg0, q, sizeof(q) - 1, &l)) {
+			q[0] = 0;
+		}
+		int ce = err ? -1 : copyin((user_addr_t)arg2, r, sizeof(r));
+		snprintf(p, sizeof(p), "%s ce%d %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+		    q, ce, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
+		    r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19], r[20], r[21], r[22], r[23]);
+	} else if (code == 347) {                           /* getfsstat64(buf, size, flags): count in rv */
+		snprintf(p, sizeof(p), "buf 0x%llx", arg0);
+	} else if (code == 339) {                                  /* fstat64(fd, struct stat64 *): dev, mode, nlink, ino */
 		struct { int32_t dev; uint16_t mode, nlink; uint64_t ino; } st = {0, 0, 0, 0};
 		int ce = copyin((user_addr_t)arg2, &st, sizeof(st));   /* arg2 carries uu_arg[1] for 339, see systemcalls hook */
 		snprintf(p, sizeof(p), "fd %llu dev %x mode %o nlink %u ino 0x%llx ce%d", arg0, st.dev, st.mode, st.nlink, st.ino, ce);
@@ -154,7 +166,7 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	dfe_sc[k].code = code;
 	dfe_sc[k].err = err;
 	dfe_sc[k].rv = rv;
-	strlcpy(dfe_sc[k].path, n > 56 ? p + n - 56 : p, sizeof(dfe_sc[k].path));   /* the tail names the file */
+	strlcpy(dfe_sc[k].path, n > 110 ? p + n - 110 : p, sizeof(dfe_sc[k].path));   /* the tail names the file */
 }
 void df_sc_dump(void);
 void

@@ -145,8 +145,15 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 		snprintf(p, sizeof(p), "%s ce%d %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
 		    q, ce, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
 		    r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19], r[20], r[21], r[22], r[23]);
-	} else if (code == 347) {                           /* getfsstat64(buf, size, flags): count in rv */
-		snprintf(p, sizeof(p), "buf 0x%llx", arg0);
+	} else if (code == 347) {                           /* getfsstat64(buf, size, flags): f_fsid (+0x30) and f_mntonname (+0x58) per entry */
+		int o = snprintf(p, sizeof(p), "n %llu", rv);
+		for (uint64_t e = 0; arg0 && !err && e < rv && e < 2; e++) {
+			uint32_t fsid[2] = {0, 0};
+			char mn[16] = {0};
+			int c1 = copyin((user_addr_t)(arg0 + e * 0x878 + 0x30), fsid, sizeof(fsid));
+			int c2 = copyin((user_addr_t)(arg0 + e * 0x878 + 0x58), mn, sizeof(mn) - 1);
+			o += snprintf(p + o, sizeof(p) - o, " [%s fsid %x:%x c%d%d]", mn, fsid[0], fsid[1], c1, c2);
+		}
 	} else if (code == 339) {                                  /* fstat64(fd, struct stat64 *): dev, mode, nlink, ino */
 		struct { int32_t dev; uint16_t mode, nlink; uint64_t ino; } st = {0, 0, 0, 0};
 		int ce = copyin((user_addr_t)arg2, &st, sizeof(st));   /* arg2 carries uu_arg[1] for 339, see systemcalls hook */

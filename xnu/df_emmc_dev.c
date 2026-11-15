@@ -127,16 +127,20 @@ df_dyld_sums(void)
 #define DFE_SC_N 24
 static struct { int code, err; uint64_t rv; char path[80]; } dfe_sc[DFE_SC_N];
 static int dfe_sc_i;
-void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv);
+void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_t arg3);
 void
-df_sc_note(int code, uint64_t arg0, int err, uint64_t rv)
+df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_t arg3)
 {
 	static char p[256];
 	size_t l = 0;
 	p[0] = 0;
-	if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
+	if (code == 427) {                                  /* fsgetpath(buf, size, fsid_t *, objid) */
+		uint32_t fsid[2] = {0, 0};
+		int ce = copyin((user_addr_t)arg2, fsid, sizeof(fsid));
+		snprintf(p, sizeof(p), "fsid %x:%x objid 0x%llx ce%d", fsid[0], fsid[1], arg3, ce);
+	} else if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
 		if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
-			strlcpy(p, "<copyinstr failed>", sizeof(p));
+			snprintf(p, sizeof(p), "<copyinstr failed, ptr 0x%llx>", arg0);
 		} else if (!strnstr(p, "dyld", sizeof(p)) && !strnstr(p, "Cryptex", sizeof(p)) && !strnstr(p, "Caches", sizeof(p))) {
 			return;
 		}

@@ -268,11 +268,16 @@ df_ps_put(char c)
 		}
 		return;
 	}
+	/* start/size live in the kernel and are re-stored every byte: the in-RAM header stopped advancing
+	 * at 10140 bytes (right after USB soft-connect) while XNU kept logging, so never read it back. */
+	static uint32_t start, size;
 	volatile uint32_t *h = (volatile uint32_t *)df_ps;
-	uint32_t start = h[1], size = h[2];
 	df_ps[12 + start] = (uint8_t)c;
-	h[1] = (start + 1) % DF_PS_DATA;
-	h[2] = size < DF_PS_DATA ? size + 1 : size;
+	start = (start + 1) % DF_PS_DATA;
+	size = size < DF_PS_DATA ? size + 1 : size;
+	h[0] = 0x43474244;
+	h[1] = start;
+	h[2] = size;
 }
 static void
 df_ps_puts(const char *s)
@@ -299,7 +304,7 @@ df_ps_hdr(void)
 		return;
 	}
 	volatile uint32_t *h = (volatile uint32_t *)df_ps;
-	uint32_t v[2] = { h[1], h[2] };
+	uint32_t v[2] = { h[1], h[2] };   /* read back right after df_ps_put stored them: shows whether the page still holds writes */
 	for (int k = 0; k < 2; k++) {
 		for (int i = 0; i < 8; i++) {
 			b[24 + k * 16 + i] = "0123456789abcdef"[(v[k] >> (28 - 4 * i)) & 0xf];

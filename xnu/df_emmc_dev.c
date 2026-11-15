@@ -137,7 +137,7 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv)
 	if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
 		if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
 			strlcpy(p, "<copyinstr failed>", sizeof(p));
-		} else if (!strstr(p, "dyld") && !strstr(p, "Cryptex") && !strstr(p, "Caches")) {
+		} else if (!strnstr(p, "dyld", sizeof(p)) && !strnstr(p, "Cryptex", sizeof(p)) && !strnstr(p, "Caches", sizeof(p))) {
 			return;
 		}
 	}

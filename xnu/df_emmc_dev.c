@@ -120,16 +120,37 @@ df_dyld_sums(void)
 	if (!df_dyld_base) {
 		return;
 	}
-	printf("dyld sums base=0x%llx\n", df_dyld_base);
-	for (uint32_t off = 0; off < 0x90000; off += 0x4000) {
-		int e = copyin(df_dyld_base + off, dfe_sum_buf, sizeof(dfe_sum_buf));
-		uint64_t s = 0, q[4] = {0, 0, 0, 0};
-		for (int i = 0; i < 0x800; i++) {
-			s += dfe_sum_buf[i];
-			q[i >> 9] += dfe_sum_buf[i];
+	(void)dfe_sum_buf; /* page sums retired: the garbage was unwritten zero blocks on super (img2simg DONT_CARE) */
+}
+
+/* fire diag: last path/shared-region syscalls of PID 1, printed at its exit (the live trace scrolls away) */
+#define DFE_SC_N 24
+static struct { int code, err; uint64_t rv; char path[80]; } dfe_sc[DFE_SC_N];
+static int dfe_sc_i;
+void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv);
+void
+df_sc_note(int code, uint64_t arg0, int err, uint64_t rv)
+{
+	int k = dfe_sc_i++ % DFE_SC_N;
+	size_t l = 0;
+	dfe_sc[k].code = code;
+	dfe_sc[k].err = err;
+	dfe_sc[k].rv = rv;
+	dfe_sc[k].path[0] = 0;
+	if (code == 5 || code == 338 || code == 339 || code == 340 || code == 463) {     /* open, stat64, fstat64?, lstat64, openat */
+		if (copyinstr((user_addr_t)arg0, dfe_sc[k].path, sizeof(dfe_sc[k].path) - 1, &l)) {
+			dfe_sc[k].path[0] = 0;
 		}
-		printf("ds %05x %08x %08x %08x %08x %08x e%d\n", off, (uint32_t)s, (uint32_t)q[0], (uint32_t)q[1],
-		    (uint32_t)q[2], (uint32_t)q[3], e);
+	}
+}
+void df_sc_dump(void);
+void
+df_sc_dump(void)
+{
+	int n = dfe_sc_i < DFE_SC_N ? dfe_sc_i : DFE_SC_N;
+	for (int j = 0; j < n; j++) {
+		int k = (dfe_sc_i - n + j) % DFE_SC_N;
+		printf("sc %d err %d rv 0x%llx %s\n", dfe_sc[k].code, dfe_sc[k].err, dfe_sc[k].rv, dfe_sc[k].path);
 	}
 }
 

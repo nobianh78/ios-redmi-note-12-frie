@@ -70,7 +70,7 @@ def build_fire_adt() -> bytes:
     root = ADTNode("device-tree")
     root.add_property("model", cstr("D221AP"))
     root.add_property("compatible", cstr("iPhone10,6") + cstr("apple,d221ap") + cstr("arm64"))
-    root.add_property("target-type", cstr("d221ap"))
+    root.add_property("target-type", cstr("D221"))
     root.add_property("product-name", cstr("iPhone10,6"))
     root.add_property("#address-cells", u32(2))
     root.add_property("#size-cells", u32(2))

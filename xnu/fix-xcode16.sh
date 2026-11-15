@@ -1194,6 +1194,18 @@ perl -0pi -e 's@(\tcase HW_TARGET:\n\t\tbzero\(dummy, sizeof\(dummy\)\);\n\t\tif
 grep -q 'strlcpy(dummy, "d221ap", sizeof(dummy));' "$mib_c" || { echo "fix-xcode16: HW_TARGET patch missing"; exit 1; }
 perl -0pi -e 's@(\tcase HW_PRODUCT:\n\t\tbzero\(dummy, sizeof\(dummy\)\);\n\t\tif \(!PEGetProductName\(dummy, 64\)\) \{\n)\t\t\treturn EINVAL;@${1}\t\t\tstrlcpy(dummy, "iPhone10,6", sizeof(dummy));@' "$mib_c"
 grep -q 'strlcpy(dummy, "iPhone10,6", sizeof(dummy));' "$mib_c" || { echo "fix-xcode16: HW_PRODUCT patch missing"; exit 1; }
+#        IOPMrootDomain.cpp: fallback hw.targettype to "D221" for iOS launchd jetsam
+iopm_cpp="$src/iokit/Kernel/IOPMrootDomain.cpp"
+perl -0pi -e 's@(return sysctl_io_string\(req, tt,)@if (tt[0] == 0) { strlcpy(tt, "D221", sizeof(tt)); } /* fix-xcode16 */\n\t$1@' "$iopm_cpp"
+grep -q 'strlcpy(tt, "D221", sizeof(tt));' "$iopm_cpp" || { echo "fix-xcode16: IOPMrootDomain targettype patch missing"; exit 1; }
+#        kern_newsysctl.c: trace sysctl name queried by PID 1
+newsysctl_c="$src/bsd/kern/kern_newsysctl.c"
+perl -0pi -e 's@(error = userland_sysctl\(FALSE, namestring, namestringlen, name, uap->namelen, &req, &oldlen\);)@$1\n\tif (p && proc_getpid(p) == 1) { printf("fire sysctl: %s (err %d)\\n", namestring ? namestring : "?", error); } /* fix-xcode16 */@' "$newsysctl_c"
+grep -q 'fire sysctl: %s' "$newsysctl_c" || { echo "fix-xcode16: newsysctl trace missing"; exit 1; }
+#        kern_exit.c: trace launchd exit details
+exit_c="$src/bsd/kern/kern_exit.c"
+perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"
+grep -q 'fire launchd exit' "$exit_c" || { echo "fix-xcode16: kern_exit patch missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
 perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
@@ -1201,7 +1213,7 @@ grep -q 'cs_process_global_enforcement' "$cs_c" || { echo "fix-xcode16: cs_proce
 perl -0pi -e 's@(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_system_enforcement' "$cs_c" || { echo "fix-xcode16: cs_system_enforcement patch missing"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
-perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = df_sc++ < 80; /* fix-xcode16 */\n\tif (df_sc_on) { printf("fire sys %d pid %d >\\n", code, pid); }$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n}' "$sc_arm"
+perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = df_sc++ < 800; /* fix-xcode16 */\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else { printf("fire sys %d pid %d >\\n", code, pid); } }$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n}' "$sc_arm"
 grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
 #        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,

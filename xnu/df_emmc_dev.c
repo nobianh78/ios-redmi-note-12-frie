@@ -134,7 +134,11 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	static char p[256];
 	size_t l = 0;
 	p[0] = 0;
-	if (code == 427) {                                  /* fsgetpath(buf, size, fsid_t *, objid) */
+	if (code == 339) {                                  /* fstat64(fd, struct stat64 *): dev, mode, nlink, ino */
+		struct { int32_t dev; uint16_t mode, nlink; uint64_t ino; } st = {0, 0, 0, 0};
+		int ce = copyin((user_addr_t)arg2, &st, sizeof(st));   /* arg2 carries uu_arg[1] for 339, see systemcalls hook */
+		snprintf(p, sizeof(p), "fd %llu dev %x mode %o nlink %u ino 0x%llx ce%d", arg0, st.dev, st.mode, st.nlink, st.ino, ce);
+	} else if (code == 427) {                                  /* fsgetpath(buf, size, fsid_t *, objid) */
 		uint32_t fsid[2] = {0, 0};
 		int ce = copyin((user_addr_t)arg2, fsid, sizeof(fsid));
 		snprintf(p, sizeof(p), "fsid %x:%x objid 0x%llx ce%d", fsid[0], fsid[1], arg3, ce);

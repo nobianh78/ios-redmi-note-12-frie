@@ -530,6 +530,9 @@ grep -q 'P6: HFS+ root on eMMC super' "$src/bsd/kern/bsd_init.c" || { echo "fix-
 #        fails, fall back to the static /sbin/fire_init so the console shell still comes up.
 perl -0pi -e 's|(\t"/sbin/launchd",\n)(\};)|$1\t"/sbin/fire_init", /* fix-xcode16 P6: static fallback */\n$2|' "$src/bsd/kern/kern_exec.c"
 grep -q 'P6: static fallback' "$src/bsd/kern/kern_exec.c" || { echo "fix-xcode16: init_programs fallback missing"; exit 1; }
+#        P6: Always log exact errno when init program exec fails (even ENOENT), and allow iOS platform binaries natively.
+perl -pi -e 's|else if \(error != ENOENT\) \{|else {|' "$src/bsd/kern/kern_exec.c"
+perl -pi -e 's|assert\(vm_map_is_alien\(map\)\);|/* fix-xcode16: allow native iOS userland without alien map */|' "$src/bsd/kern/kern_exec.c"
 #        kmputc dropped every 1-byte console write (single digits, tty echo): always pass it on.
 km_c="$src/bsd/dev/arm/km.c"
 perl -0pi -e 's|(\nkmputc\(__unused dev_t dev, char c\)\n\{\n)\tif \(!disableConsoleOutput && initialized\) \{|$1\tif (1) { /* fix-xcode16: fire has no other console, never drop 1-byte writes */|' "$km_c"

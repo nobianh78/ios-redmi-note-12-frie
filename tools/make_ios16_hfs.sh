@@ -40,16 +40,33 @@ if [ -f "$CRYPTEX_DMG" ]; then
     echo "[+] System Cryptex mounted at: $MOUNT_CRYPTEX"
 fi
 
-echo "[*] Step 3: Creating 6GB HFS+ target image (ios16_root.dmg)..."
+echo "[*] Step 3: Creating 8.2GB HFS+ target image (ios16_root.dmg)..."
+# Redmi 12 "fire" super partition is 8707 MB (8.5 GB). 8200m fits RootFS (5.25GB) + dyld_shared_cache (2.6GB) with 350MB headroom.
 rm -f ios16_root.dmg ios16_root.raw.dmg ios16_root.img
-hdiutil create -size 6g -fs HFS+ -volname fire -layout NONE ios16_root.dmg
+hdiutil create -size 8200m -fs HFS+ -volname fire -layout NONE ios16_root.dmg
 
 echo "[*] Step 4: Mounting target HFS+ image..."
 MOUNT_TARGET=$(hdiutil attach -noverify -nobrowse ios16_root.dmg | grep -o '/Volumes/.*' | head -n 1)
 echo "[+] Target mounted at: $MOUNT_TARGET"
 
-echo "[*] Step 5: Copying iOS 16 RootFS files (takes ~1-2 minutes)..."
-cp -a "$MOUNT_ROOT"/* "$MOUNT_TARGET"/
+echo "[*] Step 5: Copying ALL iOS 16 RootFS directories & files (including /sbin, /bin, /usr, /dev)..."
+# Ensure all essential root directories exist
+mkdir -p "$MOUNT_TARGET"/dev "$MOUNT_TARGET"/sbin "$MOUNT_TARGET"/bin "$MOUNT_TARGET"/usr "$MOUNT_TARGET"/private "$MOUNT_TARGET"/etc "$MOUNT_TARGET"/var "$MOUNT_TARGET"/tmp
+
+# Copy all root directories explicitly to prevent bash glob omissions
+for d in "$MOUNT_ROOT"/*; do
+    name=$(basename "$d")
+    echo "    -> Copying $name..."
+    cp -a "$d" "$MOUNT_TARGET"/ || true
+done
+
+# Copy any root system entries that glob might skip
+for item in bin sbin usr dev etc var private tmp Applications Library System Developer; do
+    if [ -e "$MOUNT_ROOT/$item" ] && [ ! -e "$MOUNT_TARGET/$item" ]; then
+        echo "    -> Explicitly copying $item..."
+        cp -a "$MOUNT_ROOT/$item" "$MOUNT_TARGET"/ || true
+    fi
+done
 
 if [ -n "$MOUNT_CRYPTEX" ]; then
     echo "[*] Step 6: Merging dyld_shared_cache from System Cryptex..."

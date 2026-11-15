@@ -399,9 +399,8 @@ void heartbeat_main(uint64_t fdt_addr) {
     fbcon_puts("\n\n");   /* skip rows hidden by the rounded corners / camera notch */
     fbcon_puts("DarwinFire heartbeat\n");
     fbcon_puts("Redmi 12 fire / MT6768\n\n");
-    /* A/B retry after XNU's own reset: skip XNU so the retries end in seconds and the first run's log
-     * survives. Slot a is TWRP (no super needed), which reads the log from pstore. */
-    if (xnu_log_pending()) {
+    /* Disabled auto-reset: don't loop-reset when Android is not on the other slot */
+    if (0 && xnu_log_pending()) {
         fbcon_puts("XNU log already in pstore:\nretry -> reset now\n");
         *(volatile uint32_t *)0x10007014ull = 0x1209;   /* TOPRGU WDT_SWRST key: immediate reset */
         for (;;) __asm__ volatile("wfe");

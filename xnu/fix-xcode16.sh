@@ -1234,7 +1234,7 @@ perl -0pi -e 's@(error = userland_sysctl\(FALSE, namestring, namestringlen, name
 grep -q 'fire sysctl: %s' "$newsysctl_c" || { echo "fix-xcode16: newsysctl trace missing"; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
-perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); extern void df_trace(const char *); extern void df_ps_hdr(void); df_trace("fire: PSTORE MARK at PID 1 exit"); df_ps_hdr(); extern volatile uint32_t *df_wdt; extern void delay(int); if (df_wdt) { printf("fire: PID 1 gone, TOPRGU reset in 90 s (time for a photo)\\n"); delay(90000000); df_wdt[0x14 / 4] = 0x1209; } } /* fix-xcode16: console writes kick the watchdog forever, so reset ourselves */\n$1@' "$exit_c"
+perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"
 grep -q 'fire launchd exit' "$exit_c" || { echo "fix-xcode16: kern_exit patch missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"

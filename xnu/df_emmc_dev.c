@@ -109,6 +109,30 @@ df_emmc_dyld_dump(void)
 	}
 }
 
+/* fire diag: set by sleh on the garbage-pointer fault; at PID 1 exit (thread context, copyin can page in)
+ * print a 64-bit word sum of each 16K page of dyld's image (0..0x90000) to compare with the file. */
+uint64_t df_dyld_base;
+static uint64_t dfe_sum_buf[0x4000 / 8];
+void df_dyld_sums(void);
+void
+df_dyld_sums(void)
+{
+	if (!df_dyld_base) {
+		return;
+	}
+	printf("dyld sums base=0x%llx\n", df_dyld_base);
+	for (uint32_t off = 0; off < 0x90000; off += 0x4000) {
+		int e = copyin(df_dyld_base + off, dfe_sum_buf, sizeof(dfe_sum_buf));
+		uint64_t s = 0, q[4] = {0, 0, 0, 0};
+		for (int i = 0; i < 0x800; i++) {
+			s += dfe_sum_buf[i];
+			q[i >> 9] += dfe_sum_buf[i];
+		}
+		printf("ds %05x %08x %08x %08x %08x %08x e%d\n", off, (uint32_t)s, (uint32_t)q[0], (uint32_t)q[1],
+		    (uint32_t)q[2], (uint32_t)q[3], e);
+	}
+}
+
 static void
 dfe_bdev_strategy(buf_t bp)
 {

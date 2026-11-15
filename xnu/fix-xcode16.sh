@@ -915,6 +915,11 @@ pe_cpp="$src/iokit/Kernel/IOPlatformExpert.cpp"
 perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n\t    platform_name\);\n\n\treturn false;|\t/* fix-xcode16: no platform kext on fire: fall back to the generic IOPlatformExpert */\n\tIOLog("fire: no driver for platform \\"%s\\", using generic IOPlatformExpert\\n", platform_name);\n\tbool df_ok = IOPlatformExpert::start(provider);\n\t/* fix-xcode16: AppleARMSMP (needs a platform interrupt controller) normally calls ml_set_max_cpus;\n\t * without it kperf_init_early blocks forever in ml_wait_max_cpus. Boot CPU only for now. */\n\tml_set_max_cpus(1);\n\t/* fix-xcode16: platform drivers registerService() at the end of start(); without it\n\t * IOSecureBSDRoot\x27s waitForMatchingService("IOPlatformExpert") times out and returns NULL. */\n\tif (df_ok) {\n\t\tregisterService();\n\t}\n\treturn df_ok;|' "$pe_cpp"
 perl -0pi -e 's|^|extern "C" void ml_set_max_cpus(unsigned int); /* fix-xcode16 */\n|' "$pe_cpp"
 grep -q 'using generic IOPlatformExpert' "$pe_cpp" || { echo "fix-xcode16: IOPanicPlatform not patched"; grep -n -A8 'IOPanicPlatform::start' "$pe_cpp"; exit 1; }
+#        Return real Apple hardware target & product name for iOS 16 launchd (iPhone X: d221ap / iPhone10,6)
+perl -0pi -e 's@(\nPEGetTargetName\([^{]*\{\n)@$1\tstrlcpy(name, "d221ap", maxLength); return true; /* fix-xcode16 */\n@' "$pe_cpp"
+grep -q 'strlcpy(name, "d221ap", maxLength);' "$pe_cpp" || { echo "fix-xcode16: PEGetTargetName patch missing"; exit 1; }
+perl -0pi -e 's@(\nPEGetProductName\([^{]*\{\n)@$1\tstrlcpy(name, "iPhone10,6", maxLength); return true; /* fix-xcode16 */\n@' "$pe_cpp"
+grep -q 'strlcpy(name, "iPhone10,6", maxLength);' "$pe_cpp" || { echo "fix-xcode16: PEGetProductName patch missing"; exit 1; }
 
 #        First on-screen kernel log on fire ends right after the platform expert: IOKitInitializeTime
 #        waits up to 30 s for an IORTC resource (closed RTC kext). No Darwin RTC driver on fire: skip it,
@@ -1183,6 +1188,12 @@ perl -pi -e 's@ret = amfi->OSEntitlements\.@ret = (amfi == NULL) ? KERN_SUCCESS 
 proc_c="$src/bsd/kern/kern_proc.c"
 perl -pi -e 's@if \(amfi->OSEntitlements_get_xml@if (amfi != NULL && amfi->OSEntitlements_get_xml@' "$proc_c"
 grep -q 'if (amfi != NULL && amfi->OSEntitlements_get_xml' "$proc_c" || { echo "fix-xcode16: kern_proc amfi get_xml guard missing"; exit 1; }
+#        kern_mib.c: fallback HW_TARGET & HW_PRODUCT for iOS launchd
+mib_c="$src/bsd/kern/kern_mib.c"
+perl -0pi -e 's@(\tcase HW_TARGET:\n\t\tbzero\(dummy, sizeof\(dummy\)\);\n\t\tif \(!PEGetTargetName\(dummy, 64\)\) \{\n)\t\t\treturn EINVAL;@${1}\t\t\tstrlcpy(dummy, "d221ap", sizeof(dummy));@' "$mib_c"
+grep -q 'strlcpy(dummy, "d221ap", sizeof(dummy));' "$mib_c" || { echo "fix-xcode16: HW_TARGET patch missing"; exit 1; }
+perl -0pi -e 's@(\tcase HW_PRODUCT:\n\t\tbzero\(dummy, sizeof\(dummy\)\);\n\t\tif \(!PEGetProductName\(dummy, 64\)\) \{\n)\t\t\treturn EINVAL;@${1}\t\t\tstrlcpy(dummy, "iPhone10,6", sizeof(dummy));@' "$mib_c"
+grep -q 'strlcpy(dummy, "iPhone10,6", sizeof(dummy));' "$mib_c" || { echo "fix-xcode16: HW_PRODUCT patch missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
 perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"

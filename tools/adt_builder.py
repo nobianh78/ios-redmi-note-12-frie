@@ -68,9 +68,10 @@ def build_fire_adt() -> bytes:
     Interrupt controller / timer nodes are deliberately absent until XNU gets that far.
     """
     root = ADTNode("device-tree")
-    root.add_property("model", cstr("Redmi 12 (fire)"))
-    root.add_property("compatible", cstr("fire") + cstr("arm64"))
-    root.add_property("target-type", cstr("fire"))
+    root.add_property("model", cstr("D221AP"))
+    root.add_property("compatible", cstr("iPhone10,6") + cstr("apple,d221ap") + cstr("arm64"))
+    root.add_property("target-type", cstr("d221ap"))
+    root.add_property("product-name", cstr("iPhone10,6"))
     root.add_property("#address-cells", u32(2))
     root.add_property("#size-cells", u32(2))
 

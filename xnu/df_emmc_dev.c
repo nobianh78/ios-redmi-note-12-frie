@@ -163,7 +163,18 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 		int ce = copyin((user_addr_t)arg2, fsid, sizeof(fsid));
 		snprintf(p, sizeof(p), "fsid %x:%x objid 0x%llx ce%d", fsid[0], fsid[1], arg3, ce);
 	} else if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
-		if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
+		if (!arg0 && code == 338) {                      /* stat(NULL): arg2 = user lr, arg3 = user fp -> who called it */
+			int o = snprintf(p, sizeof(p), "NULL lr %llx", arg2);
+			uint64_t fp = arg3;
+			for (int f = 0; f < 4 && fp; f++) {
+				uint64_t fr[2] = {0, 0};
+				if (copyin((user_addr_t)fp, fr, sizeof(fr))) {
+					break;
+				}
+				o += snprintf(p + o, sizeof(p) - o, " %llx", fr[1]);
+				fp = fr[0];
+			}
+		} else if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
 			snprintf(p, sizeof(p), "<copyinstr failed, ptr 0x%llx>", arg0);
 		} else if (!strnstr(p, "dyld", sizeof(p)) && !strnstr(p, "Cryptex", sizeof(p)) && !strnstr(p, "Caches", sizeof(p))) {
 			return;

@@ -109,6 +109,10 @@ dfe_bdev_strategy(buf_t bp)
 	} else if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
 		err = EINVAL;
 	} else if ((err = buf_map(bp, &va)) == 0) {
+		/* fire diag: reads touching /usr/lib/dyld (HFS block 2094448 = sector 16755584, 1811 sectors) */
+		if (blk < 16755584ull + 1811 && blk + (count >> 9) > 16755584ull) {
+			printf("emmc dyld rd off=0x%llx len=0x%x\n", (blk - 16755584ull) << 9, count);
+		}
 		lck_mtx_lock(&dfe_mtx);
 		if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), count >> 9, va)) {
 			err = EIO;

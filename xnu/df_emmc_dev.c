@@ -140,7 +140,8 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 		if (copyinstr((user_addr_t)arg0, q, sizeof(q) - 1, &l)) {
 			q[0] = 0;
 		}
-		int ce = err ? -1 : copyin((user_addr_t)arg2, r, sizeof(r));
+		/* dyld asks DEVID|FSID + VOL_CAPABILITIES|VOL_UUID: 64-byte reply, UUID at +0x30. Show 0x28..0x3f */
+		int ce = err ? -1 : copyin((user_addr_t)arg2 + 0x28, r, sizeof(r));
 		snprintf(p, sizeof(p), "%s ce%d %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
 		    q, ce, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11],
 		    r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19], r[20], r[21], r[22], r[23]);

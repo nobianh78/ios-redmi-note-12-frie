@@ -68,9 +68,12 @@ def convert_img2simg(raw_path, simg_path, block_size=4096):
                 out_f.write(current_data)
                 total_raw_written += len(current_data)
             elif current_type == CHUNK_TYPE_DONT_CARE:
-                total_sz = CHUNK_HDR_SIZE
-                hdr = struct.pack('<HHII', CHUNK_TYPE_DONT_CARE, 0, current_block_count, total_sz)
+                # Zero blocks must be WRITTEN as zeros: DONT_CARE leaves old partition data (Android code on
+                # "super") under every all-zero 4K block, which broke dyld's zero-padded pages.
+                total_sz = CHUNK_HDR_SIZE + 4
+                hdr = struct.pack('<HHII', CHUNK_TYPE_FILL, 0, current_block_count, total_sz)
                 out_f.write(hdr)
+                out_f.write(b'\x00\x00\x00\x00')
                 total_dont_care_blocks += current_block_count
 
             total_chunks += 1

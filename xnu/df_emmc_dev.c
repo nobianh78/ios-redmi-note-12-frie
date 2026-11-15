@@ -126,22 +126,40 @@ dfe_bdev_strategy(buf_t bp)
 	buf_biodone(bp);
 }
 
+static uint32_t dfe_block_size = 512;
+
 static int
 dfe_bdev_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, __unused struct proc *p)
 {
 	switch (cmd) {
 	case DKIOCGETBLOCKSIZE:
 	case DKIOCGETPHYSICALBLOCKSIZE:
-		*(uint32_t *)data = 512;
+		*(uint32_t *)data = dfe_block_size;
 		return 0;
+	case DKIOCSETBLOCKSIZE: {
+		uint32_t sz = *(uint32_t *)data;
+		if (sz < 512 || (sz & (sz - 1))) {
+			return EINVAL;
+		}
+		dfe_block_size = sz;
+		return 0;
+	}
 	case DKIOCGETBLOCKCOUNT:
-		*(uint64_t *)data = df_emmc_super_blocks;
+		*(uint64_t *)data = df_emmc_super_blocks * 512 / dfe_block_size;
 		return 0;
 	case DKIOCISWRITABLE:
 		*(uint32_t *)data = 0;
 		return 0;
 	case DKIOCGETFEATURES:
 		*(uint32_t *)data = 0;
+		return 0;
+	case DKIOCISSOLIDSTATE:
+		*(uint32_t *)data = 1;
+		return 0;
+	case DKIOCISVIRTUAL:
+		*(uint32_t *)data = 0;
+		return 0;
+	case DKIOCSYNCHRONIZECACHE:
 		return 0;
 	default:
 		return ENOTTY;

@@ -1161,6 +1161,8 @@ perl -0pi -e 's@(\nbadtoolate:\n)@$1\tprintf("fire: badtoolate! lret=%d err=%d\\
 grep -q 'fire: badtoolate!' "$exec_c" || { echo "fix-xcode16: badtoolate log missing"; exit 1; }
 #        mach_loader.c: bypass code signing failures and log dylinker loading
 loader_c="$src/bsd/kern/mach_loader.c"
+perl -0pi -e 's@(\tfor \(pass = 0; pass <= 3; pass\+\+\) \{\n)@$1\t\tprintf("fire: pmf pass %d\\n", pass);\n@' "$loader_c"
+grep -q 'fire: pmf pass %d' "$loader_c" || { echo "fix-xcode16: parse_machfile pass trace missing"; exit 1; }
 perl -0pi -e 's@(\t\tif \(!got_code_signatures && cs_process_global_enforcement\(\)\) \{\n\t\t\t)ret = LOAD_FAILURE;@${1}ret = LOAD_SUCCESS; /* fix-xcode16 */@' "$loader_c"
 grep -q 'ret = LOAD_SUCCESS; /\* fix-xcode16 \*/' "$loader_c" || { echo "fix-xcode16: mach_loader got_code_signatures patch missing"; exit 1; }
 perl -0pi -e 's@(\tret = get_macho_vnode\(name, cputype, header,\n\s+&file_offset, &macho_size, macho_data, &vp, imgp\);\n)@\tprintf("fire: load_dylinker \\"%s\\" (cpu 0x%x)\\n", name, (unsigned)cputype);\n$1\tprintf("fire: get_macho_vnode \\"%s\\" -> ret %d\\n", name, (int)ret);\n@' "$loader_c"
@@ -1171,6 +1173,16 @@ perl -0pi -e 's@(\ncs_validate_range\([^{]*\{\n)@$1\t(void)vp; (void)pager; (voi
 grep -q 'return TRUE; /\* fix-xcode16 \*/' "$ubc_c" || { echo "fix-xcode16: cs_validate_range patch missing"; exit 1; }
 perl -0pi -e 's@(\ncs_validate_page\([^{]*\{\n)@$1\t(void)vp; (void)pager; (void)page_offset; (void)data;\n\t*validated_p = VMP_CS_ALL_TRUE; /* fix-xcode16 */\n\t*tainted_p = VMP_CS_ALL_FALSE;\n\t*nx_p = VMP_CS_ALL_FALSE;\n\treturn;\n@' "$ubc_c"
 grep -q 'VMP_CS_ALL_TRUE; /\* fix-xcode16 \*/' "$ubc_c" || { echo "fix-xcode16: cs_validate_page patch missing"; exit 1; }
+#        ubc_subr.c: guard amfi NULL pointer dereference in accelerate_entitlement_queries and cs_blob_cleanup
+perl -0pi -e 's@(\naccelerate_entitlement_queries\([^{]*\{\n)@$1\tif (amfi == NULL) { return 0; } /* fix-xcode16: no AMFI */\n@' "$ubc_c"
+grep -q 'if (amfi == NULL) { return 0; }' "$ubc_c" || { echo "fix-xcode16: amfi guard in accelerate_entitlement_queries missing"; exit 1; }
+perl -pi -e 's@amfi->OSEntitlements_invalidate\(blob->csb_entitlements\);@if (amfi != NULL) { amfi->OSEntitlements_invalidate(blob->csb_entitlements); } /* fix-xcode16 */@' "$ubc_c"
+grep -q 'if (amfi != NULL) { amfi->OSEntitlements_invalidate' "$ubc_c" || { echo "fix-xcode16: amfi OSEntitlements_invalidate guard missing"; exit 1; }
+perl -pi -e 's@ret = amfi->OSEntitlements\.@ret = (amfi == NULL) ? KERN_SUCCESS : amfi->OSEntitlements.@' "$ubc_c"
+#        kern_proc.c: guard amfi NULL in CS_OPS_ENTITLEMENTS_BLOB
+proc_c="$src/bsd/kern/kern_proc.c"
+perl -pi -e 's@if \(amfi->OSEntitlements_get_xml@if (amfi != NULL && amfi->OSEntitlements_get_xml@' "$proc_c"
+grep -q 'if (amfi != NULL && amfi->OSEntitlements_get_xml' "$proc_c" || { echo "fix-xcode16: kern_proc amfi get_xml guard missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
 perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"

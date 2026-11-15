@@ -1152,32 +1152,30 @@ grep -q 'fire: %s execve' "$exec_c" || { echo "fix-xcode16: loop execve result l
 perl -pi -e 'if (/^\t\terror = \(\*execsw\[i\]\.ex_imgact\)\(imgp\);/) { $_ = "\t\tprintf(\"fire spawn: %s (pid %d)\\n\", imgp->ip_strings ? imgp->ip_strings : \"?\", p->p_pid);\n$_"; }' "$exec_c"
 grep -q 'fire spawn:' "$exec_c" || { echo "fix-xcode16: spawn log not inserted"; exit 1; }
 #        Bypass taskgated code signature upcall and launch constraints in process_signature
-perl -0pi -e 's{(\nprocess_signature\(proc_t p, struct image_params \*imgp\)\n\{\n)}{$1\t/* fix-xcode16: bypass taskgated & launch constraints */\n\timgp->ip_csflags |= CS_VALID | CS_SIGNED | CS_PLATFORM_BINARY;\n\tproc_lock(p);\n\tproc_csflags_update(p, imgp->ip_csflags);\n\tproc_unlock(p);\n\tprintf("fire: process_signature \\"%s\\" (pid %d) OK\\n", p->p_name, p->p_pid);\n\treturn 0;\n}' "$exec_c"
+perl -0pi -e 's@(\nprocess_signature\(proc_t p, struct image_params \*imgp\)\n\{\n)@$1\t/* fix-xcode16: bypass taskgated & launch constraints */\n\timgp->ip_csflags |= CS_VALID | CS_SIGNED | CS_PLATFORM_BINARY;\n\tproc_lock(p);\n\tproc_csflags_update(p, imgp->ip_csflags);\n\tproc_unlock(p);\n\tprintf("fire: process_signature \\"%s\\" (pid %d) OK\\n", p->p_name, p->p_pid);\n\treturn 0;\n@' "$exec_c"
 grep -q 'fire: process_signature' "$exec_c" || { echo "fix-xcode16: process_signature bypass missing"; exit 1; }
 #        Trace load_machfile and badtoolate in exec_mach_imgact
-perl -0pi -e 's{(\tlret = load_machfile\(imgp, mach_header, thread, &map, &load_result\);\n)}{\tprintf("fire: load_machfile >\\n");\n$1\tprintf("fire: load_machfile < lret %d\\n", (int)lret);\n}' "$exec_c"
+perl -0pi -e 's@(\tlret = load_machfile\(imgp, mach_header, thread, &map, &load_result\);\n)@\tprintf("fire: load_machfile >\\n");\n$1\tprintf("fire: load_machfile < lret %d\\n", (int)lret);\n@' "$exec_c"
 grep -q 'fire: load_machfile' "$exec_c" || { echo "fix-xcode16: load_machfile log missing"; exit 1; }
-perl -0pi -e 's{(\nbadtoolate:\n)}{$1\tprintf("fire: badtoolate! lret=%d err=%d\\n", (int)lret, error);\n}' "$exec_c"
+perl -0pi -e 's@(\nbadtoolate:\n)@$1\tprintf("fire: badtoolate! lret=%d err=%d\\n", (int)lret, error);\n@' "$exec_c"
 grep -q 'fire: badtoolate!' "$exec_c" || { echo "fix-xcode16: badtoolate log missing"; exit 1; }
 #        mach_loader.c: bypass code signing failures and log dylinker loading
 loader_c="$src/bsd/kern/mach_loader.c"
-perl -0pi -e 's{if \(cs_process_global_enforcement\(\) \|\|\n\s+\(result->csflags & \(CS_HARD \| CS_KILL \| CS_ENFORCEMENT\)\)\) \{\n\s+ret = LOAD_FAILURE;\n\s+\}\n\s+result->csflags &= ~CS_VALID;}{/* fix-xcode16: allow unsigned binaries */\n\t\t\t\t\t\t\tresult->csflags &= ~(CS_HARD | CS_KILL | CS_ENFORCEMENT);\n\t\t\t\t\t\t\tresult->csflags |= CS_VALID | CS_SIGNED;}' "$loader_c"
-grep -q 'fix-xcode16: allow unsigned binaries' "$loader_c" || { echo "fix-xcode16: mach_loader cs_validate_range patch missing"; exit 1; }
-perl -0pi -e 's{(\t\tif \(!got_code_signatures && cs_process_global_enforcement\(\)\) \{\n\t\t\t)ret = LOAD_FAILURE;}{$1ret = LOAD_SUCCESS; /* fix-xcode16 */}' "$loader_c"
+perl -0pi -e 's@(\t\tif \(!got_code_signatures && cs_process_global_enforcement\(\)\) \{\n\t\t\t)ret = LOAD_FAILURE;@${1}ret = LOAD_SUCCESS; /* fix-xcode16 */@' "$loader_c"
 grep -q 'ret = LOAD_SUCCESS; /\* fix-xcode16 \*/' "$loader_c" || { echo "fix-xcode16: mach_loader got_code_signatures patch missing"; exit 1; }
-perl -0pi -e 's{(\tret = get_macho_vnode\(name, cputype, header,\n\s+&file_offset, &macho_size, macho_data, &vp, imgp\);\n)}{\tprintf("fire: load_dylinker \\"%s\\" (cpu 0x%x)\\n", name, (unsigned)cputype);\n$1\tprintf("fire: get_macho_vnode \\"%s\\" -> ret %d\\n", name, (int)ret);\n}' "$loader_c"
+perl -0pi -e 's@(\tret = get_macho_vnode\(name, cputype, header,\n\s+&file_offset, &macho_size, macho_data, &vp, imgp\);\n)@\tprintf("fire: load_dylinker \\"%s\\" (cpu 0x%x)\\n", name, (unsigned)cputype);\n$1\tprintf("fire: get_macho_vnode \\"%s\\" -> ret %d\\n", name, (int)ret);\n@' "$loader_c"
 grep -q 'fire: load_dylinker' "$loader_c" || { echo "fix-xcode16: load_dylinker log missing"; exit 1; }
 #        ubc_subr.c: always validate code signing pages/ranges without AMFI
 ubc_c="$src/bsd/kern/ubc_subr.c"
-perl -0pi -e 's{(\ncs_validate_range\([^{]+\{\n)}{$1\t(void)vp; (void)pager; (void)page_offset; (void)data; (void)dsize;\n\t*tainted = 0;\n\treturn TRUE; /* fix-xcode16 */\n}' "$ubc_c"
+perl -0pi -e 's@(\ncs_validate_range\([^{]*\{\n)@$1\t(void)vp; (void)pager; (void)page_offset; (void)data; (void)dsize;\n\t*tainted = 0;\n\treturn TRUE; /* fix-xcode16 */\n@' "$ubc_c"
 grep -q 'return TRUE; /\* fix-xcode16 \*/' "$ubc_c" || { echo "fix-xcode16: cs_validate_range patch missing"; exit 1; }
-perl -0pi -e 's{(\ncs_validate_page\([^{]+\{\n)}{$1\t(void)vp; (void)pager; (void)page_offset; (void)data;\n\t*validated_p = VMP_CS_ALL_TRUE; /* fix-xcode16 */\n\t*tainted_p = VMP_CS_ALL_FALSE;\n\t*nx_p = VMP_CS_ALL_FALSE;\n\treturn;\n}' "$ubc_c"
+perl -0pi -e 's@(\ncs_validate_page\([^{]*\{\n)@$1\t(void)vp; (void)pager; (void)page_offset; (void)data;\n\t*validated_p = VMP_CS_ALL_TRUE; /* fix-xcode16 */\n\t*tainted_p = VMP_CS_ALL_FALSE;\n\t*nx_p = VMP_CS_ALL_FALSE;\n\treturn;\n@' "$ubc_c"
 grep -q 'VMP_CS_ALL_TRUE; /\* fix-xcode16 \*/' "$ubc_c" || { echo "fix-xcode16: cs_validate_page patch missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
-perl -0pi -e 's{(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;}{${1}0; /* fix-xcode16 */}' "$cs_c"
+perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_process_global_enforcement' "$cs_c" || { echo "fix-xcode16: cs_process_global_enforcement patch missing"; exit 1; }
-perl -0pi -e 's{(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;}{${1}0; /* fix-xcode16 */}' "$cs_c"
+perl -0pi -e 's@(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_system_enforcement' "$cs_c" || { echo "fix-xcode16: cs_system_enforcement patch missing"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
 perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = df_sc++ < 80; /* fix-xcode16 */\n\tif (df_sc_on) { printf("fire sys %d pid %d >\\n", code, pid); }$1\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n}' "$sc_arm"

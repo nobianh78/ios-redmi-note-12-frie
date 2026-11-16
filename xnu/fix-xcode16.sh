@@ -481,6 +481,7 @@ df_cons_write(const char *s, int n)
  * IRQs, CNTV_CTL_EL0. Tells whether the virtual timer interrupt (PPI 27) actually arrives.
  */
 static uint64_t df_irq_count, df_irq_timer, df_irq_done, df_irq_last;
+uint32_t df_wq_cnt[5];   /* pid 1 workqueue: creator calls, no req admitted, new threads, create fails, thread runs */
 void df_irq_stat(uint32_t id);
 void
 df_irq_stat(uint32_t id)
@@ -488,7 +489,7 @@ df_irq_stat(uint32_t id)
 	char line[128];
 	int n = 0;
 	/* id 0xffffffff = "handler finished" (called after rtclock_intr + EOI) */
-	const char *lbl[6] = { "IRQ n=", " id=", " timer=", " done=", " cntv_ctl=", " tval=" };
+	const char *lbl[6] = { "IRQ n=", " WQ sc=", " noreq=", " new=", " fail=", " run=" };   /* launchd workqueue counters */
 	uint64_t ctl, tval;
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
@@ -522,14 +523,12 @@ df_irq_stat(uint32_t id)
 		}
 	}
 	int32_t stval = (int32_t)(uint32_t)tval;   /* signed: negative = already expired */
-	uint64_t val[6] = { df_irq_count, df_irq_last, df_irq_timer, df_irq_done, ctl,
-	    (uint64_t)(stval < 0 ? -(int64_t)stval : stval) };
+	(void)stval; (void)ctl;
+	extern uint32_t df_wq_cnt[5];
+	uint64_t val[6] = { df_irq_count, df_wq_cnt[0], df_wq_cnt[1], df_wq_cnt[2], df_wq_cnt[3], df_wq_cnt[4] };
 	for (int k = 0; k < 6; k++) {
 		for (const char *p = lbl[k]; *p; p++) {
 			line[n++] = *p;
-		}
-		if (k == 5 && stval < 0) {
-			line[n++] = '-';
 		}
 		char tmp[20];
 		int t = 0;
@@ -1272,13 +1271,14 @@ perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|$
 grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs rd= hide not inserted"; grep -n 'PE_boot_args()' "$ksys_c"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"
-perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } /* fix-xcode16 wq */\n}' "$wq_c"
-perl -0pi -e 's{(\n\treq = workq_threadreq_select_for_creator\(wq\);\n\tif \(req == NULL\) \{\n)}{$1\t\tif (p \&\& proc_getpid(p) == 1) printf("fire wq sc no req admitted\\n");\n}' "$wq_c"
-perl -0pi -e 's{(kret = pthread_functions->workq_create_threadstack\(p, vmap, &th_stackaddr\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq stack fail %d pid %d\\n", kret, proc_getpid(p));\n}' "$wq_c"
-perl -0pi -e 's{(kret = thread_create_workq_waiting\(proc_task\(p\), workq_unpark_continue, &th\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq thcreate fail %d pid %d\\n", kret, proc_getpid(p));\n}' "$wq_c"
-perl -0pi -e 's{(\n\tWQ_TRACE_WQ\(TRACE_wq_thread_create \| DBG_FUNC_NONE, wq, 0, 0, 0\);\n)}{$1\tif (proc_getpid(p) == 1) printf("fire wq new thread n %d\\n", wq->wq_nthreads);\n}' "$wq_c"
-perl -0pi -e 's{(\nworkq_setup_and_run\(proc_t p, struct uthread \*uth, int setup_flags\)\n\{\n)}{$1\t{ static int df_r; if (proc_getpid(p) == 1 \&\& df_r++ < 40) printf("fire wq run t%x sf %x\\n", (unsigned)(((uintptr_t)uth >> 4) \& 0xffff), setup_flags); } /* fix-xcode16 wq */\n}' "$wq_c"
-for m in 'fire wq sc rq' 'no req admitted' 'wq stack fail' 'thcreate fail' 'wq new thread' 'fire wq run'; do grep -q "$m" "$wq_c" || { echo "fix-xcode16: wq trace '$m' not inserted"; exit 1; }; done
+perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } if (p \&\& proc_getpid(p) == 1) DF_WQ(0); /* fix-xcode16 wq */\n}' "$wq_c"
+perl -0pi -e 's{(\n\treq = workq_threadreq_select_for_creator\(wq\);\n\tif \(req == NULL\) \{\n)}{$1\t\tif (p \&\& proc_getpid(p) == 1) { printf("fire wq sc no req admitted\\n"); DF_WQ(1); }\n}' "$wq_c"
+perl -0pi -e 's{(kret = pthread_functions->workq_create_threadstack\(p, vmap, &th_stackaddr\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq stack fail %d pid %d\\n", kret, proc_getpid(p)); if (proc_getpid(p) == 1) DF_WQ(3);\n}' "$wq_c"
+perl -0pi -e 's{(kret = thread_create_workq_waiting\(proc_task\(p\), workq_unpark_continue, &th\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq thcreate fail %d pid %d\\n", kret, proc_getpid(p)); if (proc_getpid(p) == 1) DF_WQ(3);\n}' "$wq_c"
+perl -0pi -e 's{(\n\tWQ_TRACE_WQ\(TRACE_wq_thread_create \| DBG_FUNC_NONE, wq, 0, 0, 0\);\n)}{$1\tif (proc_getpid(p) == 1) { printf("fire wq new thread n %d\\n", wq->wq_nthreads); DF_WQ(2); }\n}' "$wq_c"
+perl -0pi -e 's{(\nworkq_setup_and_run\(proc_t p, struct uthread \*uth, int setup_flags\)\n\{\n)}{$1\t{ static int df_r; if (proc_getpid(p) == 1 \&\& df_r++ < 40) printf("fire wq run t%x sf %x\\n", (unsigned)(((uintptr_t)uth >> 4) \& 0xffff), setup_flags); if (proc_getpid(p) == 1) DF_WQ(4); } /* fix-xcode16 wq */\n}' "$wq_c"
+perl -0pi -e 's{\A}{extern unsigned int df_wq_cnt[5]; extern void df_irq_stat(unsigned int);\n#define DF_WQ(k) do { df_wq_cnt[k]++; df_irq_stat(0xffffffffu); } while (0) /* fix-xcode16: counters on the yellow status line */\n}' "$wq_c"
+for m in 'DF_WQ(4)' 'fire wq sc rq' 'no req admitted' 'wq stack fail' 'thcreate fail' 'wq new thread' 'fire wq run'; do grep -q "$m" "$wq_c" || { echo "fix-xcode16: wq trace '$m' not inserted"; exit 1; }; done
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"

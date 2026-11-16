@@ -195,6 +195,36 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	dfe_sc[k].rv = rv;
 	strlcpy(dfe_sc[k].path, n > 110 ? p + n - 110 : p, sizeof(dfe_sc[k].path));   /* the tail names the file */
 }
+/* fire diag: kevent_qos(kq, changelist, nchanges, ...) of PID 1: what it registers before it blocks.
+ * struct kevent_qos_s = ident u64, filter i16, flags u16, qos i32, udata u64, fflags u32, xflags u32,
+ * data i64, ext[4] u64 = 72 bytes. EVFILT_TIMER is -7, EVFILT_MACHPORT -8, EVFILT_SIGNAL -6. */
+void df_kev(uint64_t changelist, uint64_t nchanges, uint64_t flags);
+void
+df_kev(uint64_t changelist, uint64_t nchanges, uint64_t flags)
+{
+	static int n;
+	if (n++ > 400) {
+		return;
+	}
+	for (uint64_t i = 0; i < nchanges && i < 6; i++) {
+		uint8_t k[72];
+		if (copyin((user_addr_t)(changelist + i * 72), k, sizeof(k))) {
+			break;
+		}
+		int16_t filter;
+		uint16_t kflags;
+		uint32_t fflags;
+		int64_t data;
+		uint64_t ident;
+		memcpy(&ident, k + 0, 8);
+		memcpy(&filter, k + 8, 2);
+		memcpy(&kflags, k + 10, 2);
+		memcpy(&fflags, k + 24, 4);
+		memcpy(&data, k + 32, 8);
+		printf("kev ch filt %d id 0x%llx fl 0x%x ffl 0x%x data %lld kfl 0x%llx\n", filter, ident, kflags, fflags, data, flags);
+	}
+}
+
 /* fire diag: launchd blocks in kevent_qos (374); print what it opened/spawned since the last wait, once */
 void df_sc_dump_new(void);
 void

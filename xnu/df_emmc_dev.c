@@ -134,7 +134,9 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	static char p[256];
 	size_t l = 0;
 	p[0] = 0;
-	if (code == 92 || code == 153 || code == 197) {    /* fcntl(fd,cmd,arg) / pread(fd,buf,n,off) / mmap(addr,len,prot,flags,fd,off): arg2 = uu_arg[1], arg3 = uu_arg[2] */
+	if (code == 360 || code == 366 || code == 367 || code == 368) {   /* bsdthread_create/register, workq_open/kernreturn */
+		snprintf(p, sizeof(p), "op/a0 0x%llx a1 0x%llx", arg0, arg2);
+	} else if (code == 92 || code == 153 || code == 197) {    /* fcntl(fd,cmd,arg) / pread(fd,buf,n,off) / mmap(addr,len,prot,flags,fd,off): arg2 = uu_arg[1], arg3 = uu_arg[2] */
 		snprintf(p, sizeof(p), "a0 %llx a1 %llx a3 %llx", arg0, arg2, arg3);   /* arg3 carries uu_arg[3] */
 	} else if (code == 220) {                                  /* getattrlist(path, alist, buf, size): show path + reply */
 		char q[48] = {0};

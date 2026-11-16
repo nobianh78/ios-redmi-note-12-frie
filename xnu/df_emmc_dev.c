@@ -393,3 +393,5 @@ df_emmc_devinit(void)
 		devfs_make_node(makedev(dfe_bmajor, 0), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0440, "emmc_super");
 	}
 }
+
+int df_tail_on;   /* set when launchd opens its lo0 socket: trace every pid 1 syscall from there on */

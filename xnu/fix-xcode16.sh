@@ -1326,6 +1326,12 @@ grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs
 spec_c="$src/bsd/miscfs/specfs/spec_vnops.c"
 perl -0pi -e 's|if \(\(error = vfs_mountedon\(vp\)\)\) \{|if ((ap->a_mode \& FWRITE) \&\& (error = vfs_mountedon(vp))) { /* fix-xcode16: RO open of mounted root */|' "$spec_c"
 grep -q 'RO open of mounted root' "$spec_c" || { echo "fix-xcode16: spec_open mountedon patch missing"; exit 1; }
+#        vfs_lookup.c: the macOS-built HFS root has /etc, /var, /tmp as empty DIRECTORIES (the build script
+#        mkdir'd them) instead of symlinks to /private/...; launchd aborts: "unable to resolve 'mobile'" (no
+#        /etc/master.passwd). Redirect those prefixes in namei.
+lookup_c="$src/bsd/vfs/vfs_lookup.c"
+perl -0pi -e 's|(\n\tndp->ni_pathlen = \(u_int\)bytes_copied;\n\tbytes_copied = 0;\n)|$1\t{ char *df_b = cnp->cn_pnbuf; if (df_b[0] == \x27/\x27 \&\& ((df_b[1] == \x27e\x27 \&\& df_b[2] == \x27t\x27 \&\& df_b[3] == \x27c\x27) \|\| (df_b[1] == \x27v\x27 \&\& df_b[2] == \x27a\x27 \&\& df_b[3] == \x27r\x27) \|\| (df_b[1] == \x27t\x27 \&\& df_b[2] == \x27m\x27 \&\& df_b[3] == \x27p\x27)) \&\& (df_b[4] == \x27/\x27 \|\| df_b[4] == 0) \&\& ndp->ni_pathlen + 8 <= cnp->cn_pnlen) { memmove(df_b + 8, df_b, ndp->ni_pathlen); memcpy(df_b, "/private", 8); ndp->ni_pathlen += 8; } } /* fix-xcode16: /etc /var /tmp -> /private */\n|' "$lookup_c"
+grep -q '/etc /var /tmp -> /private' "$lookup_c" || { echo "fix-xcode16: namei /private redirect missing"; grep -n 'ni_pathlen = (u_int)bytes_copied' "$lookup_c"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"
 perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } if (p \&\& proc_getpid(p) == 1) DF_WQ(0); /* fix-xcode16 wq */\n}' "$wq_c"

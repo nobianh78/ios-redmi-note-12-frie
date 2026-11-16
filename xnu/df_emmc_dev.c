@@ -7,6 +7,7 @@
  * there is no path from userland to an eMMC write.
  */
 #include <kern/locks.h>
+#include <kern/kalloc.h>
 
 extern int df_emmc_readn(uint32_t lba, uint32_t n, void *buf);
 extern uint64_t df_emmc_sectors;
@@ -92,9 +93,9 @@ extern int df_emmc_read(uint32_t lba, void *buf);
 static int dfe_bmajor = -1;
 
 static int
-dfe_bdev_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
+dfe_bdev_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
-	return (flags & FWRITE) ? EROFS : 0;
+	return 0;   /* writable: writes go to the RAM overlay below, never to the card */
 }
 
 /* fire diag: dyld reads happen at exec, long before the fault scrolls them off; keep them for the fault trace */
@@ -257,6 +258,79 @@ df_sc_dump(void)
 	}
 }
 
+/* Writes to the root never reach the card: they land in a RAM copy-on-write overlay of 4 KB pages
+ * (lost at reboot). Open-addressing table page -> 4 KB buffer, filled from the eMMC on first write. */
+#define DFE_OV_SLOTS (1u << 17)   /* up to 128K pages = 512 MB of changed data */
+static uint64_t *dfe_ov_key;     /* page + 1, 0 = empty */
+static uint8_t **dfe_ov_val;
+static uint32_t dfe_ov_n;
+
+static uint8_t *
+dfe_ov_find(uint64_t page, int create)
+{
+	if (!dfe_ov_key) {
+		if (!create) {
+			return NULL;
+		}
+		dfe_ov_key = kalloc_data(DFE_OV_SLOTS * sizeof(uint64_t), Z_WAITOK | Z_ZERO);
+		dfe_ov_val = kalloc_data(DFE_OV_SLOTS * sizeof(uint8_t *), Z_WAITOK | Z_ZERO);
+		if (!dfe_ov_key || !dfe_ov_val) {
+			return NULL;
+		}
+	}
+	uint32_t h = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 47) & (DFE_OV_SLOTS - 1);
+	for (uint32_t i = 0; i < DFE_OV_SLOTS; i++, h = (h + 1) & (DFE_OV_SLOTS - 1)) {
+		if (dfe_ov_key[h] == page + 1) {
+			return dfe_ov_val[h];
+		}
+		if (!dfe_ov_key[h]) {
+			if (!create || dfe_ov_n >= DFE_OV_SLOTS * 3 / 4) {
+				return NULL;
+			}
+			uint8_t *v = kalloc_data(4096, Z_WAITOK);
+			if (!v || df_emmc_readn((uint32_t)(df_emmc_super_lba + page * 8), 8, v)) {
+				return NULL;
+			}
+			dfe_ov_val[h] = v;
+			dfe_ov_key[h] = page + 1;
+			dfe_ov_n++;
+			if ((dfe_ov_n & 1023) == 1) {
+				printf("emmc: RAM overlay %u pages (%u MB)\n", dfe_ov_n, dfe_ov_n / 256);
+			}
+			return v;
+		}
+	}
+	return NULL;
+}
+
+/* sector-granular I/O through the overlay: blk/count in 512-byte sectors */
+static int
+dfe_ov_io(uint64_t blk, uint32_t nsec, uint8_t *va, int write)
+{
+	while (nsec) {
+		uint64_t page = blk >> 3;
+		uint32_t off = (uint32_t)(blk & 7), n = 8 - off;
+		if (n > nsec) {
+			n = nsec;
+		}
+		uint8_t *pg = dfe_ov_find(page, write);
+		if (write) {
+			if (!pg) {
+				return ENOSPC;
+			}
+			memcpy(pg + off * 512, va, n * 512);
+		} else if (pg) {
+			memcpy(va, pg + off * 512, n * 512);
+		} else if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), n, va)) {
+			return EIO;
+		}
+		blk += n;
+		nsec -= n;
+		va += n * 512;
+	}
+	return 0;
+}
+
 static void
 dfe_bdev_strategy(buf_t bp)
 {
@@ -265,7 +339,23 @@ dfe_bdev_strategy(buf_t bp)
 	caddr_t va = 0;
 	int err = 0;
 	if (!(buf_flags(bp) & B_READ)) {
-		err = EROFS;
+		if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
+			err = EINVAL;
+		} else if ((err = buf_map(bp, &va)) == 0) {
+			lck_mtx_lock(&dfe_mtx);
+			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 1);
+			lck_mtx_unlock(&dfe_mtx);
+			buf_unmap(bp);
+		}
+	} else if (dfe_ov_key) {   /* something was written: reads go through the overlay */
+		if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
+			err = EINVAL;
+		} else if ((err = buf_map(bp, &va)) == 0) {
+			lck_mtx_lock(&dfe_mtx);
+			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 0);
+			lck_mtx_unlock(&dfe_mtx);
+			buf_unmap(bp);
+		}
 	} else if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
 		err = EINVAL;
 	} else if ((err = buf_map(bp, &va)) == 0) {
@@ -313,7 +403,7 @@ dfe_bdev_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, 
 		*(uint64_t *)data = df_emmc_super_blocks * 512 / dfe_block_size;
 		return 0;
 	case DKIOCISWRITABLE:
-		*(uint32_t *)data = 0;
+		*(uint32_t *)data = 1;
 		return 0;
 	case DKIOCGETFEATURES:
 		*(uint32_t *)data = 0;

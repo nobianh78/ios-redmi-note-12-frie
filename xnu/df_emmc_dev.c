@@ -342,18 +342,26 @@ dfe_bdev_strategy(buf_t bp)
 		if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
 			err = EINVAL;
 		} else if ((err = buf_map(bp, &va)) == 0) {
+			static int dfe_wn;
+			int dfe_w = dfe_wn++ < 200;
+			if (dfe_w) { printf("emmc W> blk %llu n %u\n", blk, count >> 9); }
 			lck_mtx_lock(&dfe_mtx);
 			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 1);
 			lck_mtx_unlock(&dfe_mtx);
+			if (dfe_w) { printf("emmc W< err %d ov %u\n", err, dfe_ov_n); }
 			buf_unmap(bp);
 		}
 	} else if (dfe_ov_key) {   /* something was written: reads go through the overlay */
 		if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {
 			err = EINVAL;
 		} else if ((err = buf_map(bp, &va)) == 0) {
+			static int dfe_rn;
+			int dfe_r = dfe_rn++ < 200;
+			if (dfe_r) { printf("emmc R> blk %llu n %u\n", blk, count >> 9); }
 			lck_mtx_lock(&dfe_mtx);
 			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 0);
 			lck_mtx_unlock(&dfe_mtx);
+			if (dfe_r) { printf("emmc R< err %d\n", err); }
 			buf_unmap(bp);
 		}
 	} else if ((count & 511) || blk + (count >> 9) > df_emmc_super_blocks) {

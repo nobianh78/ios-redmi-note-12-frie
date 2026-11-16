@@ -273,11 +273,15 @@ df_ps_put(char c)
 	static uint32_t start, size;
 	volatile uint32_t *h = (volatile uint32_t *)df_ps;
 	df_ps[12 + start] = (uint8_t)c;
+	/* ml_io_map gives a cacheable mapping here (the screen code needs dc civac too): without a clean to
+	 * PoC the log sat in the CPU cache and a key-combo reset lost everything after ~10 KB. */
+	__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)&df_ps[12 + start]) : "memory");
 	start = (start + 1) % DF_PS_DATA;
 	size = size < DF_PS_DATA ? size + 1 : size;
 	h[0] = 0x43474244;
 	h[1] = start;
 	h[2] = size;
+	__asm__ volatile ("dc civac, %0\n\tdsb sy" :: "r"((uintptr_t)h) : "memory");
 }
 static void
 df_ps_puts(const char *s)

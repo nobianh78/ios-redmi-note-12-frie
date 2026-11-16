@@ -1232,12 +1232,12 @@ grep -q 'strlcpy(tt, "D221", sizeof(tt));' "$iopm_cpp" || { echo "fix-xcode16: I
 newsysctl_c="$src/bsd/kern/kern_newsysctl.c"
 perl -0pi -e 's@(error = userland_sysctl\(FALSE, namestring, namestringlen, name, uap->namelen, &req, &oldlen\);)@$1\n\tif (p && proc_getpid(p) == 1) { printf("fire sysctl: %s (err %d)\\n", namestring ? namestring : "?", error); } /* fix-xcode16 */@' "$newsysctl_c"
 grep -q 'fire sysctl: %s' "$newsysctl_c" || { echo "fix-xcode16: newsysctl trace missing"; exit 1; }
-#        vm_unix.c: shared_region_map_and_slide_2_np returns EPERM for the dyld cache (root-owned, on the
-#        root HFS+). Tag every EPERM in the file with its source line so the screen shows which check fires.
+#        vm_unix.c: shared_region_map_and_slide_2_np -> EPERM for the dyld cache. VMAPPLE is a macOS config
+#        (CONFIG_CSR): unless SIP allows unrestricted FS, the cache vnode must carry SF_RESTRICTED, which the
+#        HFS+ root files don't have. fire has no SIP: skip that check (owner == root is still enforced).
 vmu_c="$src/bsd/vm/vm_unix.c"
-perl -pi -e 's/^(\s*)(error = EPERM;)/$1$2 printf("fire vm_unix EPERM line %d\\n", __LINE__); \/* fix-xcode16 *\//' "$vmu_c"
-grep -q 'fire vm_unix EPERM line' "$vmu_c" || { echo "fix-xcode16: vm_unix EPERM trace missing"; grep -n 'EPERM' "$vmu_c" | head; exit 1; }
-echo "fix-xcode16: vm_unix EPERM sites tagged: $(grep -c 'fire vm_unix EPERM line' "$vmu_c")"
+perl -pi -e 's/if \(csr_check\(CSR_ALLOW_UNRESTRICTED_FS\) != 0\) \{/if (0 \&\& csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) { \/* fix-xcode16: no SIP on fire *\//' "$vmu_c"
+grep -q 'no SIP on fire' "$vmu_c" || { echo "fix-xcode16: shared cache SIP check not patched"; grep -n 'csr_check' "$vmu_c"; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"

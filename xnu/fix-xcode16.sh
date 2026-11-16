@@ -416,13 +416,14 @@ df_con_glyph(volatile uint32_t *fb, char c, uint32_t color)
 {
 	const unsigned pitch = 4320 / 4, top = 60;   /* full height: 60 (below the camera hole) .. 2400 */
 	unsigned ch = (c == '\t') ? ' ' : (c < 0x20 || c > 0x7e) ? '?' : (unsigned)c;
-	for (int fy = 0; fy < 8; fy++) {
-		uint8_t bits = font8x8[ch - 0x20][fy];
-		volatile uint32_t *px = &fb[(top + df_con_row * 9 + fy) * pitch + df_con_col * 8];
-		for (int fx = 0; fx < 8; fx++) {
-			px[fx] = (bits & (1 << fx)) ? color : 0xff000000;
+	for (int fy = 0; fy < 16; fy++) {   /* 2x scaled 8x8 font: 16x18 cells, readable in photos */
+		uint8_t bits = font8x8[ch - 0x20][fy / 2];
+		volatile uint32_t *px = &fb[(top + df_con_row * 18 + fy) * pitch + df_con_col * 16];
+		for (int fx = 0; fx < 16; fx++) {
+			px[fx] = (bits & (1 << (fx / 2))) ? color : 0xff000000;
 		}
 		__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)px) : "memory");
+		__asm__ volatile ("dc civac, %0" :: "r"((uintptr_t)(px + 15)) : "memory");
 	}
 	df_con_col++;
 }
@@ -467,7 +468,7 @@ void
 df_cons_write(const char *s, int n)
 {
 	volatile uint32_t *fb = df_fbva;
-	const unsigned pitch = 4320 / 4, top = 60, rows = (2400 - 60) / 9, cols = 1080 / 8;   /* 260 lines */
+	const unsigned pitch = 4320 / 4, top = 60, rows = (2400 - 60) / 18, cols = 1080 / 16;   /* 130 lines x 67 cols, 2x font */
 	if (df_wdt) {
 		df_wdt[0x08 / 4] = 0x1971;   /* WDT_RST reload */
 	}
@@ -483,8 +484,8 @@ df_cons_write(const char *s, int n)
 			df_ln_recolor(fb);
 			df_con_col = 0;
 			df_con_row = (df_con_row + 1) % rows;
-			for (unsigned y = 0; y < 9; y++) {          /* clear the new line */
-				volatile uint32_t *line = &fb[(top + df_con_row * 9 + y) * pitch];
+			for (unsigned y = 0; y < 18; y++) {          /* clear the new line */
+				volatile uint32_t *line = &fb[(top + df_con_row * 18 + y) * pitch];
 				for (unsigned x = 0; x < 1080; x++) {
 					line[x] = 0xff000000;
 				}
@@ -493,7 +494,7 @@ df_cons_write(const char *s, int n)
 				}
 			}
 			{   /* cyan bar under the newest line: shows where the wrapped log ends */
-				volatile uint32_t *bar = &fb[(top + ((df_con_row + 1) % rows) * 9) * pitch];
+				volatile uint32_t *bar = &fb[(top + ((df_con_row + 1) % rows) * 18) * pitch];
 				for (unsigned x = 0; x < 1080; x++) {
 					bar[x] = 0xff00ffff;
 				}
@@ -1342,7 +1343,7 @@ grep -q 'cs_process_global_enforcement' "$cs_c" || { echo "fix-xcode16: cs_proce
 perl -0pi -e 's@(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_system_enforcement' "$cs_c" || { echo "fix-xcode16: cs_system_enforcement patch missing"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
-perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = (code == 242 \|\| code == 245 \|\| code == 244 \|\| code == 169 \|\| code == 170 \|\| code == 59 \|\| code == 1 \|\| code == 5 \|\| code == 345 \|\| code == 346 \|\| code == 347) \&\& df_sc++ < 100000; /* fix-xcode16: screen filter: spawn, csops, execve, exit, open (+ any error below) */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (df_sc_on \|\| (error \&\& pid == 1 \&\& code != 374 \&\& code != 375)) { printf("fire sys %d < err %d rv %lld t%x\\n", code, error, (long long)uthread->uu_rval[0], (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
+perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = (code == 242 \|\| code == 245 \|\| code == 244 \|\| code == 169 \|\| code == 170 \|\| code == 59 \|\| code == 1 \|\| code == 5 \|\| code == 345 \|\| code == 346 \|\| code == 347) \&\& df_sc++ < 100000; /* fix-xcode16: screen filter: spawn, csops, execve, exit, open (+ any error below) */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (error \&\& pid == 1 \&\& (code == 338 \|\| code == 340)) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, \&df_l); printf("fire stat %s err %d\\n", df_p, error); }\n\tif (df_sc_on \|\| (error \&\& pid == 1 \&\& code != 374 \&\& code != 375)) { printf("fire sys %d < err %d rv %lld t%x\\n", code, error, (long long)uthread->uu_rval[0], (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
 grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
 #        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,

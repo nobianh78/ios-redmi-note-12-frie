@@ -405,7 +405,7 @@ df_puts(const char *s, unsigned long caller)
 
 /*
  * fire bring-up: mirror every console_write() (all kernel printf output) to the L3 layer as text,
- * rows 1310..2030 (the panic printer owns 2040..2460). 135 cols x 80 lines, wraps to the top.
+ * rows 60..2400 (covers the heartbeat text; a panic draws over it). 135 cols x 260 lines, wraps to the top.
  * shortcut: no lock, no scrolling; fine on one CPU during bring-up, replace with a real fb console later.
  */
 static unsigned df_con_row, df_con_col;
@@ -414,7 +414,7 @@ void df_usb_putc(char c);       /* USB CDC-ACM console (df_usb.c, appended below
 static void
 df_con_glyph(volatile uint32_t *fb, char c, uint32_t color)
 {
-	const unsigned pitch = 4320 / 4, top = 1310;
+	const unsigned pitch = 4320 / 4, top = 60;   /* full height: 60 (below the camera hole) .. 2400 */
 	unsigned ch = (c == '\t') ? ' ' : (c < 0x20 || c > 0x7e) ? '?' : (unsigned)c;
 	for (int fy = 0; fy < 8; fy++) {
 		uint8_t bits = font8x8[ch - 0x20][fy];
@@ -431,7 +431,7 @@ void
 df_cons_write(const char *s, int n)
 {
 	volatile uint32_t *fb = df_fbva;
-	const unsigned pitch = 4320 / 4, top = 1310, rows = (2030 - 1310) / 9, cols = 1080 / 8;
+	const unsigned pitch = 4320 / 4, top = 60, rows = (2400 - 60) / 9, cols = 1080 / 8;   /* 260 lines */
 	if (df_wdt) {
 		df_wdt[0x08 / 4] = 0x1971;   /* WDT_RST reload */
 	}
@@ -540,7 +540,7 @@ df_irq_stat(uint32_t id)
 		}
 	}
 	volatile uint32_t *fb = df_fbva;
-	const unsigned pitch = 4320 / 4, y0 = 1300;
+	const unsigned pitch = 4320 / 4, y0 = 50;   /* right above the full-height log (top = 60) */
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	for (int fy = 0; fy < 8; fy++) {
 		volatile uint32_t *row = &fb[(y0 + fy) * pitch];
@@ -1181,7 +1181,7 @@ sleh_c="$src/osfmk/arm64/sleh.c"
 perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 #        Log EL0 exceptions (SVC = syscalls of PID 1, aborts = its faults)
-perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && (class != 0x15 \|\| df_n < 50)) { if (class == 0x15) df_n++; printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) printf("fire el0 regs x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"
+perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && ((class != 0x15 && class != 0x20 && class != 0x24) \|\| (far >> 48) != 0)) { df_n++; /* screen filter: real faults only, not SVC or demand paging */ printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) printf("fire el0 regs x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"
 grep -q 'fire el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
 #        Bring-up traces of the launchd exec / first-syscall hangs (EL0 trap, exec steps, process_signature,
 #        SVC path, open path, mockfs vnops) are gone: the fixes they led to are the AMFI guards below and the
@@ -1251,7 +1251,7 @@ perl -0pi -e 's@(return sysctl_io_string\(req, tt,)@if (tt[0] == 0) { strlcpy(tt
 grep -q 'strlcpy(tt, "D221", sizeof(tt));' "$iopm_cpp" || { echo "fix-xcode16: IOPMrootDomain targettype patch missing"; exit 1; }
 #        kern_newsysctl.c: trace sysctl name queried by PID 1
 newsysctl_c="$src/bsd/kern/kern_newsysctl.c"
-perl -0pi -e 's@(error = userland_sysctl\(FALSE, namestring, namestringlen, name, uap->namelen, &req, &oldlen\);)@$1\n\tif (p && proc_getpid(p) == 1) { printf("fire sysctl: %s (err %d)\\n", namestring ? namestring : "?", error); } /* fix-xcode16 */@' "$newsysctl_c"
+perl -0pi -e 's@(error = userland_sysctl\(FALSE, namestring, namestringlen, name, uap->namelen, &req, &oldlen\);)@$1\n\tif (p && proc_getpid(p) == 1 && error) { printf("fire sysctl: %s (err %d)\\n", namestring ? namestring : "?", error); } /* fix-xcode16 */@' "$newsysctl_c"
 grep -q 'fire sysctl: %s' "$newsysctl_c" || { echo "fix-xcode16: newsysctl trace missing"; exit 1; }
 #        vm_unix.c: shared_region_map_and_slide_2_np -> EPERM for the dyld cache. VMAPPLE is a macOS config
 #        (CONFIG_CSR): unless SIP allows unrestricted FS, the cache vnode must carry SF_RESTRICTED, which the
@@ -1262,8 +1262,8 @@ grep -q 'no SIP on fire' "$vmu_c" || { echo "fix-xcode16: shared cache SIP check
 #        bsd_arm64.c mach_syscall: launchd stops between preparing a boot task and posix_spawn, with no BSD
 #        syscall left; trace PID 1's Mach traps (number, first args, result) to see where it waits.
 ba64_c="$src/osfmk/arm64/bsd_arm64.c"
-perl -0pi -e 's{(\n(\s*)(retval = mach_call\(&args\);))}{\n$2int df_mt_on = 0; { extern int proc_selfpid(void); static int df_mt; df_mt_on = proc_selfpid() == 1 \&\& df_mt++ < 4000; if (df_mt_on) { printf("fire trap %d a1 0x%llx a2 0x%llx a3 0x%llx a4 0x%llx a5 0x%llx >\\n", call_number, (unsigned long long)args.arg1, (unsigned long long)args.arg2, (unsigned long long)args.arg3, (unsigned long long)args.arg4, (unsigned long long)args.arg5); } } /* fix-xcode16 */\n$2$3\n$2if (df_mt_on) { printf("fire trap %d < 0x%x\\n", call_number, (unsigned)retval); } /* fix-xcode16 */}' "$ba64_c"
-grep -q 'fire trap %d a1' "$ba64_c" || { echo "fix-xcode16: mach trap trace not inserted"; grep -n 'mach_call' "$ba64_c" | head; exit 1; }
+perl -0pi -e 's{(\n(\s*)(retval = mach_call\(&args\);))}{\n$2int df_mt_on = 0; { extern int proc_selfpid(void); static int df_mt; df_mt_on = proc_selfpid() == 1 \&\& df_mt++ < 4000; } /* fix-xcode16 */\n$2$3\n$2if (df_mt_on \&\& retval) { printf("fire trap %d a1 0x%llx a2 0x%llx a3 0x%llx a4 0x%llx a5 0x%llx < 0x%x\\n", call_number, (unsigned long long)args.arg1, (unsigned long long)args.arg2, (unsigned long long)args.arg3, (unsigned long long)args.arg4, (unsigned long long)args.arg5, (unsigned)retval); } /* fix-xcode16: screen filter, failures only */}' "$ba64_c"
+grep -q 'fire trap %d a1' "$ba64_c" && grep -q 'failures only' "$ba64_c" || { echo "fix-xcode16: mach trap trace not inserted"; grep -n 'mach_call' "$ba64_c" | head; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"
@@ -1275,7 +1275,7 @@ grep -q 'cs_process_global_enforcement' "$cs_c" || { echo "fix-xcode16: cs_proce
 perl -0pi -e 's@(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_system_enforcement' "$cs_c" || { echo "fix-xcode16: cs_system_enforcement patch missing"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
-perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = df_sc++ < 100000; /* fix-xcode16 */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); extern void df_sc_dump_new(void); df_sc_dump_new(); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (df_sc_on) { printf("fire sys %d < err %d rv %lld\\n", code, error, (long long)uthread->uu_rval[0]); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
+perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = (code == 244 \|\| code == 169 \|\| code == 170 \|\| code == 59 \|\| code == 1 \|\| code == 5) \&\& df_sc++ < 100000; /* fix-xcode16: screen filter: spawn, csops, execve, exit, open (+ any error below) */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (df_sc_on \|\| (error \&\& pid == 1 \&\& code != 374 \&\& code != 375)) { printf("fire sys %d < err %d rv %lld t%x\\n", code, error, (long long)uthread->uu_rval[0], (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
 grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
 #        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,

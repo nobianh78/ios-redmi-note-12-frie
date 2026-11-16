@@ -556,16 +556,28 @@ df_irq_stat(uint32_t id)
 		if (df_frq && df_now - df_cons_last > 5 * df_frq) {
 			extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps;
 			extern vm_offset_t vm_kernel_slide;
-			char df_b[160];
-			uint64_t df_pc = df_irq_pc, df_lr = df_irq_lr, df_fp = df_irq_fp, df_ps = df_irq_ps;
-			int df_l = snprintf(df_b, sizeof(df_b), "HANG pc %llx lr %llx cpsr %llx slide %lx\n",
-			    df_pc, df_lr, df_ps, (unsigned long)vm_kernel_slide);
-			df_cons_write(df_b, df_l);
+			uint64_t df_v[14];
+			int df_k = 0;
+			uint64_t df_fp = df_irq_fp;
+			df_v[df_k++] = df_irq_pc;
+			df_v[df_k++] = df_irq_lr;
+			df_v[df_k++] = df_irq_ps;
+			df_v[df_k++] = (uint64_t)vm_kernel_slide;
 			for (int df_i = 0; df_i < 10 && df_fp && (df_fp >> 40) == 0xffffffull && !(df_fp & 7); df_i++) {
 				uint64_t *df_f = (uint64_t *)df_fp;
-				df_l = snprintf(df_b, sizeof(df_b), " fr%d %llx\n", df_i, df_f[1]);
-				df_cons_write(df_b, df_l);
+				df_v[df_k++] = df_f[1];
 				df_fp = df_f[0];
+			}
+			char df_b[24];
+			df_cons_write("HANG pc/lr/cpsr/slide/frames:\n", 31);
+			for (int df_i = 0; df_i < df_k; df_i++) {   /* no snprintf in this file: hand-made hex */
+				int df_l = 0;
+				df_b[df_l++] = ' ';
+				for (int df_sh = 60; df_sh >= 0; df_sh -= 4) {
+					df_b[df_l++] = "0123456789abcdef"[(df_v[df_i] >> df_sh) & 15];
+				}
+				df_b[df_l++] = '\n';
+				df_cons_write(df_b, df_l);
 			}
 		}
 	}

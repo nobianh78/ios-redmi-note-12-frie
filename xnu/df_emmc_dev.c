@@ -200,8 +200,13 @@ void df_sc_dump_new(void);
 void
 df_sc_dump_new(void)
 {
+	/* reprint the whole ring whenever something new happened: earlier dumps scroll off the screen */
 	static int done;
-	int from = done > dfe_sc_i - DFE_SC_N ? done : dfe_sc_i - DFE_SC_N;
+	if (done == dfe_sc_i) {
+		return;
+	}
+	int from = dfe_sc_i > DFE_SC_N ? dfe_sc_i - DFE_SC_N : 0;
+	printf("sc ring %d..%d\n", from, dfe_sc_i);
 	for (int j = from; j < dfe_sc_i; j++) {
 		int k = j % DFE_SC_N;
 		printf("sc %d err %d rv 0x%llx %s\n", dfe_sc[k].code, dfe_sc[k].err, dfe_sc[k].rv, dfe_sc[k].path);

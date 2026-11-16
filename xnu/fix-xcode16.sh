@@ -492,6 +492,15 @@ df_cons_write(const char *s, int n)
 					__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
 				}
 			}
+			{   /* cyan bar under the newest line: shows where the wrapped log ends */
+				volatile uint32_t *bar = &fb[(top + ((df_con_row + 1) % rows) * 9) * pitch];
+				for (unsigned x = 0; x < 1080; x++) {
+					bar[x] = 0xff00ffff;
+				}
+				for (uintptr_t a = (uintptr_t)bar; a < (uintptr_t)(bar + 1080); a += 64) {
+					__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+				}
+			}
 			/* yellow IRQ count at the start of each line: shows when the timer IRQs stop */
 			char d[20];
 			int t = 0;

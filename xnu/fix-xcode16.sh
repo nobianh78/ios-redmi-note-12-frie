@@ -1100,6 +1100,15 @@ cp "$hfs_tmp"/core/*.c "$hfs_tmp"/core/*.h "$hfs_dst/core/"
 cp "$hfs_tmp"/hfs_encodings/hfs_encodings.c "$hfs_tmp"/hfs_encodings/hfs_encodinghint.c "$hfs_tmp"/hfs_encodings/*.h "$hfs_dst/hfs_encodings/"
 rm -rf "$hfs_tmp"
 cp "$(dirname "$0")/df_hfs_config.h" "$(dirname "$0")/df_aks_stub.h" "$(dirname "$0")/df_hfs_glue.c" "$hfs_dst/core/"
+#        diag: hard hang inside hfs_vnop_write (first file write after launchd_cache_loader). Breadcrumbs A..F.
+hrw="$hfs_dst/core/hfs_readwrite.c"
+perl -0pi -e 's|(\nagain:\n\t/\*\n\t \* Protect against a size change\.)|\n#define DFW(c) do { static int dfw_n; if (dfw_n++ < 300) printf("hfsw %s\\n", c); } while (0)\nagain:\n\tDFW("A truncate lock");\n\t/*\n\t * Protect against a size change.|' "$hrw"
+perl -0pi -e 's|(\tcnode_locked = 1;\n\n\tfilebytes = hfs_blk_to_bytes)|\tDFW("B cnode locked");\n$1|' "$hrw"
+perl -0pi -e 's|(\n\tif \(hfs_start_transaction\(hfsmp\) != 0\) \{\n\t\tretval = EINVAL;)|\n\tDFW("C start transaction");$1|' "$hrw"
+perl -0pi -e 's|(\n\t\tretval = MacToVFSError\(ExtendFileC \(hfsmp, \(FCB\*\)fp, bytesToAdd,)|\n\t\tDFW("D ExtendFileC");$1|' "$hrw"
+perl -0pi -e 's|(\n\t\thfs_systemfile_unlock\(hfsmp, lockflags\);\n)(\n\t\tif \(\(actualBytesAdded == 0\))|$1\t\tDFW("E extended");\n$2|' "$hrw"
+perl -0pi -e 's|(\n\t\tretval = cluster_write\(vp, uio, fp->ff_size, filesize, head_off,)|\n\t\tDFW("F cluster_write");$1|' "$hrw"
+for m in 'A truncate lock' 'B cnode locked' 'C start transaction' 'D ExtendFileC' 'E extended' 'F cluster_write'; do grep -q "$m" "$hrw" || { echo "fix-xcode16: hfs write breadcrumb '$m' missing"; exit 1; }; done
 #        Kernel headers include <TargetConditionals.h> on the kext path (osfmk/kern/debug.h) and the xnu
 #        tree has none. Not in EXTERNAL_HEADERS: corecrypto/cc_config.h probes __has_include(<TargetConditionals.h>),
 #        so a global copy changes how the kernel itself builds (model_dep.c started wanting

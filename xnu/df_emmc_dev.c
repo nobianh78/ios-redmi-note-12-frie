@@ -124,7 +124,7 @@ df_dyld_sums(void)
 }
 
 /* fire diag: last path/shared-region syscalls of PID 1, printed at its exit (the live trace scrolls away) */
-#define DFE_SC_N 24
+#define DFE_SC_N 64
 static struct { int code, err; uint64_t rv; char path[112]; } dfe_sc[DFE_SC_N];
 static int dfe_sc_i;
 void df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_t arg3);
@@ -164,7 +164,15 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 		uint32_t fsid[2] = {0, 0};
 		int ce = copyin((user_addr_t)arg2, fsid, sizeof(fsid));
 		snprintf(p, sizeof(p), "fsid %x:%x objid 0x%llx ce%d", fsid[0], fsid[1], arg3, ce);
-	} else if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64: keep only shared-cache paths */
+	} else if (code == 244) {                           /* posix_spawn(pid*, path, ...): arg2 carries the path pointer */
+		if (copyinstr((user_addr_t)arg2, p, sizeof(p) - 1, &l)) {
+			strlcpy(p, "<spawn path?>", sizeof(p));
+		}
+	} else if (code == 463) {                           /* openat(fd, path, ...): arg2 carries the path pointer */
+		if (copyinstr((user_addr_t)arg2, p, sizeof(p) - 1, &l)) {
+			p[0] = 0;
+		}
+	} else if (code == 5 || code == 338 || code == 340) {     /* open, stat64, lstat64 */
 		if (!arg0 && code == 338) {                      /* stat(NULL): arg2 = user lr, arg3 = user fp -> who called it */
 			int o = snprintf(p, sizeof(p), "NULL lr %llx", arg2);
 			uint64_t fp = arg3;
@@ -178,8 +186,6 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 			}
 		} else if (copyinstr((user_addr_t)arg0, p, sizeof(p) - 1, &l)) {
 			snprintf(p, sizeof(p), "<copyinstr failed, ptr 0x%llx>", arg0);
-		} else if (!strnstr(p, "dyld", sizeof(p)) && !strnstr(p, "Cryptex", sizeof(p)) && !strnstr(p, "Caches", sizeof(p))) {
-			return;
 		}
 	}
 	int k = dfe_sc_i++ % DFE_SC_N;
@@ -188,6 +194,19 @@ df_sc_note(int code, uint64_t arg0, int err, uint64_t rv, uint64_t arg2, uint64_
 	dfe_sc[k].err = err;
 	dfe_sc[k].rv = rv;
 	strlcpy(dfe_sc[k].path, n > 110 ? p + n - 110 : p, sizeof(dfe_sc[k].path));   /* the tail names the file */
+}
+/* fire diag: launchd blocks in kevent_qos (374); print what it opened/spawned since the last wait, once */
+void df_sc_dump_new(void);
+void
+df_sc_dump_new(void)
+{
+	static int done;
+	int from = done > dfe_sc_i - DFE_SC_N ? done : dfe_sc_i - DFE_SC_N;
+	for (int j = from; j < dfe_sc_i; j++) {
+		int k = j % DFE_SC_N;
+		printf("sc %d err %d rv 0x%llx %s\n", dfe_sc[k].code, dfe_sc[k].err, dfe_sc[k].rv, dfe_sc[k].path);
+	}
+	done = dfe_sc_i;
 }
 void df_sc_dump(void);
 void

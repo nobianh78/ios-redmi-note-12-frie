@@ -1270,6 +1270,15 @@ grep -q 'fire trap %d a1' "$ba64_c" && grep -q 'failures only' "$ba64_c" || { ec
 ksys_c="$src/bsd/kern/kern_sysctl.c"
 perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|${1}${2}{ char *df_rd = strnstr(buf, "rd=md0", sizeof(buf)); if (df_rd) { memset(df_rd, \x27 \x27, 6); } } /* fix-xcode16: no restore mode for launchd */\n|' "$ksys_c"
 grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs rd= hide not inserted"; grep -n 'PE_boot_args()' "$ksys_c"; exit 1; }
+#        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
+wq_c="$src/bsd/pthread/pthread_workqueue.c"
+perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } /* fix-xcode16 wq */\n}' "$wq_c"
+perl -0pi -e 's{(\n\treq = workq_threadreq_select_for_creator\(wq\);\n\tif \(req == NULL\) \{\n)}{$1\t\tif (p \&\& proc_getpid(p) == 1) printf("fire wq sc no req admitted\\n");\n}' "$wq_c"
+perl -0pi -e 's{(kret = pthread_functions->workq_create_threadstack\(p, vmap, &th_stackaddr\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq stack fail %d pid %d\\n", kret, proc_getpid(p));\n}' "$wq_c"
+perl -0pi -e 's{(kret = thread_create_workq_waiting\(proc_task\(p\), workq_unpark_continue, &th\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq thcreate fail %d pid %d\\n", kret, proc_getpid(p));\n}' "$wq_c"
+perl -0pi -e 's{(\n\tWQ_TRACE_WQ\(TRACE_wq_thread_create \| DBG_FUNC_NONE, wq, 0, 0, 0\);\n)}{$1\tif (proc_getpid(p) == 1) printf("fire wq new thread n %d\\n", wq->wq_nthreads);\n}' "$wq_c"
+perl -0pi -e 's{(\nworkq_setup_and_run\(proc_t p, struct uthread \*uth, int setup_flags\)\n\{\n)}{$1\t{ static int df_r; if (proc_getpid(p) == 1 \&\& df_r++ < 40) printf("fire wq run t%x sf %x\\n", (unsigned)(((uintptr_t)uth >> 4) \& 0xffff), setup_flags); } /* fix-xcode16 wq */\n}' "$wq_c"
+for m in 'fire wq sc rq' 'no req admitted' 'wq stack fail' 'thcreate fail' 'wq new thread' 'fire wq run'; do grep -q "$m" "$wq_c" || { echo "fix-xcode16: wq trace '$m' not inserted"; exit 1; }; done
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"

@@ -1238,6 +1238,11 @@ grep -q 'fire sysctl: %s' "$newsysctl_c" || { echo "fix-xcode16: newsysctl trace
 vmu_c="$src/bsd/vm/vm_unix.c"
 perl -pi -e 's/if \(csr_check\(CSR_ALLOW_UNRESTRICTED_FS\) != 0\) \{/if (0 \&\& csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) { \/* fix-xcode16: no SIP on fire *\//' "$vmu_c"
 grep -q 'no SIP on fire' "$vmu_c" || { echo "fix-xcode16: shared cache SIP check not patched"; grep -n 'csr_check' "$vmu_c"; exit 1; }
+#        bsd_arm64.c mach_syscall: launchd stops between preparing a boot task and posix_spawn, with no BSD
+#        syscall left; trace PID 1's Mach traps (number, first args, result) to see where it waits.
+ba64_c="$src/osfmk/arm64/bsd_arm64.c"
+perl -0pi -e 's{(\n(\s*)(retval = mach_call\(&args\);))}{\n$2int df_mt_on = 0; { extern int proc_selfpid(void); static int df_mt; df_mt_on = proc_selfpid() == 1 \&\& df_mt++ < 4000; if (df_mt_on) { printf("fire trap %d a1 0x%llx a2 0x%llx a3 0x%llx a4 0x%llx a5 0x%llx >\\n", call_number, (unsigned long long)args.arg1, (unsigned long long)args.arg2, (unsigned long long)args.arg3, (unsigned long long)args.arg4, (unsigned long long)args.arg5); } } /* fix-xcode16 */\n$2$3\n$2if (df_mt_on) { printf("fire trap %d < 0x%x\\n", call_number, (unsigned)retval); } /* fix-xcode16 */}' "$ba64_c"
+grep -q 'fire trap %d a1' "$ba64_c" || { echo "fix-xcode16: mach trap trace not inserted"; grep -n 'mach_call' "$ba64_c" | head; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"

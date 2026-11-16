@@ -1264,6 +1264,12 @@ grep -q 'no SIP on fire' "$vmu_c" || { echo "fix-xcode16: shared cache SIP check
 ba64_c="$src/osfmk/arm64/bsd_arm64.c"
 perl -0pi -e 's{(\n(\s*)(retval = mach_call\(&args\);))}{\n$2int df_mt_on = 0; { extern int proc_selfpid(void); static int df_mt; df_mt_on = proc_selfpid() == 1 \&\& df_mt++ < 4000; } /* fix-xcode16 */\n$2$3\n$2if (df_mt_on \&\& retval) { printf("fire trap %d a1 0x%llx a2 0x%llx a3 0x%llx a4 0x%llx a5 0x%llx < 0x%x\\n", call_number, (unsigned long long)args.arg1, (unsigned long long)args.arg2, (unsigned long long)args.arg3, (unsigned long long)args.arg4, (unsigned long long)args.arg5, (unsigned)retval); } /* fix-xcode16: screen filter, failures only */}' "$ba64_c"
 grep -q 'fire trap %d a1' "$ba64_c" && grep -q 'failures only' "$ba64_c" || { echo "fix-xcode16: mach trap trace not inserted"; grep -n 'mach_call' "$ba64_c" | head; exit 1; }
+#        kern_sysctl.c: launchd reads kern.bootargs and enters "Restore environment" on rd=md0, so it never
+#        runs the normal boot chain. The kernel still needs rd=md0 for IOFindBSDRoot (the HFS+ super root
+#        replaces it right after, in setconf); hide it from userland only.
+ksys_c="$src/bsd/kern/kern_sysctl.c"
+perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|$1$2{ char *df_rd = strnstr(buf, "rd=md0", sizeof(buf)); if (df_rd) { memset(df_rd, \x27 \x27, 6); } } /* fix-xcode16: no restore mode for launchd */\n|' "$ksys_c"
+grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs rd= hide not inserted"; grep -n 'PE_boot_args()' "$ksys_c"; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"

@@ -493,3 +493,46 @@ df_emmc_devinit(void)
 }
 
 int df_tail_on;   /* set when launchd opens its lo0 socket: trace every pid 1 syscall from there on */
+
+/* fire diag: every 15 s print where the threads of pids 1..40 sleep (uu_wmesg / uu_wchan): finds the hang */
+#include <sys/proc_internal.h>
+#include <sys/user.h>
+#include <kern/thread_call.h>
+static thread_call_t dfw_tc;
+static void
+dfw_tick(__unused thread_call_param_t a, __unused thread_call_param_t b)
+{
+	static int round;
+	printf("fire watch %d\n", ++round);
+	for (int pid = 1; pid <= 40; pid++) {
+		proc_t p = proc_find(pid);
+		if (p == PROC_NULL) {
+			continue;
+		}
+		uthread_t uth;
+		proc_lock(p);
+		TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
+			if (uth->uu_wmesg || uth->uu_wchan) {
+				printf("fire w pid %d %s t%x wmesg %s wchan %p\n", pid, proc_best_name(p),
+				    (unsigned)(((uintptr_t)uth >> 4) & 0xffff), uth->uu_wmesg ? uth->uu_wmesg : "-", uth->uu_wchan);
+			}
+		}
+		proc_unlock(p);
+		proc_rele(p);
+	}
+	uint64_t dl;
+	clock_interval_to_deadline(15, NSEC_PER_SEC, &dl);
+	thread_call_enter_delayed(dfw_tc, dl);
+}
+void df_watch_start(void);
+void
+df_watch_start(void)
+{
+	if (dfw_tc) {
+		return;
+	}
+	dfw_tc = thread_call_allocate(dfw_tick, NULL);
+	uint64_t dl;
+	clock_interval_to_deadline(30, NSEC_PER_SEC, &dl);
+	thread_call_enter_delayed(dfw_tc, dl);
+}

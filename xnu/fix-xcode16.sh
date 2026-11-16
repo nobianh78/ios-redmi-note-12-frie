@@ -1268,7 +1268,7 @@ grep -q 'fire trap %d a1' "$ba64_c" && grep -q 'failures only' "$ba64_c" || { ec
 #        runs the normal boot chain. The kernel still needs rd=md0 for IOFindBSDRoot (the HFS+ super root
 #        replaces it right after, in setconf); hide it from userland only.
 ksys_c="$src/bsd/kern/kern_sysctl.c"
-perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|$1$2{ char *df_rd = strnstr(buf, "rd=md0", sizeof(buf)); if (df_rd) { memset(df_rd, \x27 \x27, 6); } } /* fix-xcode16: no restore mode for launchd */\n|' "$ksys_c"
+perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|${1}${2}{ char *df_rd = strnstr(buf, "rd=md0", sizeof(buf)); if (df_rd) { memset(df_rd, \x27 \x27, 6); } } /* fix-xcode16: no restore mode for launchd */\n|' "$ksys_c"
 grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs rd= hide not inserted"; grep -n 'PE_boot_args()' "$ksys_c"; exit 1; }
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"

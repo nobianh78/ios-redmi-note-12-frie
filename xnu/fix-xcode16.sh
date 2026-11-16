@@ -464,9 +464,11 @@ df_ln_recolor(volatile uint32_t *fb)
 	df_ln_n = 0;
 }
 void df_cons_write(const char *s, int n);
+static uint64_t df_cons_last;
 void
 df_cons_write(const char *s, int n)
 {
+	df_cons_last = mach_absolute_time();
 	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, top = 60, rows = (2400 - 60) / 18, cols = 1080 / 16;   /* 130 lines x 67 cols, 2x font */
 	if (df_wdt) {
@@ -533,6 +535,10 @@ df_cons_write(const char *s, int n)
  * fire bring-up: IRQ status line at row 1300 (just above the log): total IRQs, last INTID, timer
  * IRQs, CNTV_CTL_EL0. Tells whether the virtual timer interrupt (PPI 27) actually arrives.
  */
+#include <arm/cpu_data_internal.h>
+#include <mach/arm/thread_status.h>
+#include <mach/vm_param.h>
+static uint64_t df_cons_last;   /* mach time of the last console write: a 5 s gap = hang, see df_irq_stat */
 static uint64_t df_irq_count, df_irq_timer, df_irq_done, df_irq_last;
 uint32_t df_wq_cnt[5];   /* pid 1 workqueue: creator calls, no req admitted, new threads, create fails, thread runs */
 void df_irq_stat(uint32_t id);
@@ -546,6 +552,30 @@ df_irq_stat(uint32_t id)
 	uint64_t ctl, tval;
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
+	if ((id == 27 || id == 30) && df_cons_last) {   /* hang report: where the interrupted CPU was, every 5 s of silence */
+		uint64_t df_ns = 0;
+		absolutetime_to_nanoseconds(mach_absolute_time() - df_cons_last, &df_ns);
+		if (df_ns > 5000000000ull) {
+			arm_saved_state_t *df_st = getCpuDatap()->cpu_int_state;
+			char df_b[160];
+			uint64_t df_pc = 0, df_lr = 0, df_fp = 0, df_ps = 0;
+			if (df_st) {
+				df_pc = get_saved_state_pc(df_st);
+				df_lr = get_saved_state_lr(df_st);
+				df_fp = get_saved_state_fp(df_st);
+				df_ps = get_saved_state_cpsr(df_st);
+			}
+			int df_l = snprintf(df_b, sizeof(df_b), "HANG pc %llx lr %llx cpsr %llx slide %lx\n",
+			    df_pc, df_lr, df_ps, (unsigned long)vm_kernel_slide);
+			df_cons_write(df_b, df_l);
+			for (int df_i = 0; df_i < 10 && df_fp && (df_fp >> 40) == 0xffffffull && !(df_fp & 7); df_i++) {
+				uint64_t *df_f = (uint64_t *)df_fp;
+				df_l = snprintf(df_b, sizeof(df_b), " fr%d %llx\n", df_i, df_f[1]);
+				df_cons_write(df_b, df_l);
+				df_fp = df_f[0];
+			}
+		}
+	}
 	if (id == 0xffffffffu) {
 		df_irq_done++;
 	} else {

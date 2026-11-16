@@ -343,7 +343,7 @@ dfe_bdev_strategy(buf_t bp)
 			err = EINVAL;
 		} else if ((err = buf_map(bp, &va)) == 0) {
 			static int dfe_wn;
-			int dfe_w = dfe_wn++ < 200;
+			int dfe_w = 0 && dfe_wn++ < 200;
 			if (dfe_w) { printf("emmc W> blk %llu n %u\n", blk, count >> 9); }
 			lck_mtx_lock(&dfe_mtx);
 			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 1);
@@ -356,7 +356,7 @@ dfe_bdev_strategy(buf_t bp)
 			err = EINVAL;
 		} else if ((err = buf_map(bp, &va)) == 0) {
 			static int dfe_rn;
-			int dfe_r = dfe_rn++ < 200;
+			int dfe_r = 0 && dfe_rn++ < 200;
 			if (dfe_r) { printf("emmc R> blk %llu n %u\n", blk, count >> 9); }
 			lck_mtx_lock(&dfe_mtx);
 			err = dfe_ov_io(blk, count >> 9, (uint8_t *)va, 0);

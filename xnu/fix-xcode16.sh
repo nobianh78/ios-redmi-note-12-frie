@@ -426,6 +426,42 @@ df_con_glyph(volatile uint32_t *fb, char c, uint32_t color)
 	}
 	df_con_col++;
 }
+/* finished line: redraw red if it reports a failure, green if it reports success (user request) */
+static char df_ln[136];
+static unsigned df_ln_n, df_ln_c0;
+static int
+df_ln_has(const char *w)
+{
+	for (unsigned i = 0; i < df_ln_n; i++) {
+		unsigned k = 0;
+		while (w[k] && i + k < df_ln_n && df_ln[i + k] == w[k]) {
+			k++;
+		}
+		if (!w[k]) {
+			return 1;
+		}
+	}
+	return 0;
+}
+static void
+df_ln_recolor(volatile uint32_t *fb)
+{
+	int bad = df_ln_has("fail") || df_ln_has("Fail") || df_ln_has("error") || df_ln_has("Error") || df_ln_has("panic") || df_ln_has("abort") || df_ln_has("denied");
+	for (char d = '1'; d <= '9' && !bad; d++) {
+		char w[6] = { 'e', 'r', 'r', ' ', d, 0 };
+		bad = df_ln_has(w);
+	}
+	int good = !bad && (df_ln_has("err 0") || df_ln_has(" OK") || df_ln_has("success") || df_ln_has("hello"));
+	if (bad || good) {
+		unsigned col = df_con_col;
+		df_con_col = df_ln_c0;
+		for (unsigned i = 0; i < df_ln_n; i++) {
+			df_con_glyph(fb, df_ln[i], bad ? 0xffff4040 : 0xff40ff40);
+		}
+		df_con_col = col;
+	}
+	df_ln_n = 0;
+}
 void df_cons_write(const char *s, int n);
 void
 df_cons_write(const char *s, int n)
@@ -444,6 +480,7 @@ df_cons_write(const char *s, int n)
 		}
 		df_usb_putc(c);
 		if (c == '\n' || df_con_col == cols) {
+			df_ln_recolor(fb);
 			df_con_col = 0;
 			df_con_row = (df_con_row + 1) % rows;
 			for (unsigned y = 0; y < 9; y++) {          /* clear the new line */
@@ -470,6 +507,12 @@ df_cons_write(const char *s, int n)
 		}
 		if (c == '\r') {
 			continue;
+		}
+		if (df_ln_n == 0) {
+			df_ln_c0 = df_con_col;
+		}
+		if (df_ln_n < sizeof(df_ln)) {
+			df_ln[df_ln_n++] = c;
 		}
 		df_con_glyph(fb, c, 0xffffffff);
 	}
@@ -1290,7 +1333,7 @@ grep -q 'cs_process_global_enforcement' "$cs_c" || { echo "fix-xcode16: cs_proce
 perl -0pi -e 's@(\ncs_system_enforcement\(void\)\n\{\n\treturn )cs_system_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"
 grep -q 'cs_system_enforcement' "$cs_c" || { echo "fix-xcode16: cs_system_enforcement patch missing"; exit 1; }
 sc_arm="$src/bsd/dev/arm/systemcalls.c"
-perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = (code == 244 \|\| code == 169 \|\| code == 170 \|\| code == 59 \|\| code == 1 \|\| code == 5 \|\| code == 345 \|\| code == 346 \|\| code == 347) \&\& df_sc++ < 100000; /* fix-xcode16: screen filter: spawn, csops, execve, exit, open (+ any error below) */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (df_sc_on \|\| (error \&\& pid == 1 \&\& code != 374 \&\& code != 375)) { printf("fire sys %d < err %d rv %lld t%x\\n", code, error, (long long)uthread->uu_rval[0], (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
+perl -0pi -e 's{(\n\tAUDIT_SYSCALL_ENTER\(code, proc, uthread\);\n\terror = \(\*\(callp->sy_call\)\)\(proc, &uthread->uu_arg\[0\], &\(uthread->uu_rval\[0\]\)\);\n)}{\n\tstatic int df_sc; int df_sc_on = (code == 242 \|\| code == 245 \|\| code == 244 \|\| code == 169 \|\| code == 170 \|\| code == 59 \|\| code == 1 \|\| code == 5 \|\| code == 345 \|\| code == 346 \|\| code == 347) \&\& df_sc++ < 100000; /* fix-xcode16: screen filter: spawn, csops, execve, exit, open (+ any error below) */ if (pid == 1) { extern void df_ps_reattach(void); df_ps_reattach(); } if ((code == 374 || code == 375) && pid == 1) { extern void df_kev(uint64_t, uint64_t, uint64_t); df_kev(uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[7]); }\n\tif (df_sc_on) { if (code == 5 || code == 345) { char df_p[64] = {0}; size_t df_l = 0; copyinstr(uthread->uu_arg[0], df_p, sizeof(df_p) - 1, &df_l); printf("fire sys %d (%s) pid %d >\\n", code, df_p, pid); } else if (code == 242 || code == 245) { printf("fire sys %d (cmd 0x%lx) pid %d >\\n", code, (unsigned long)uthread->uu_arg[1], pid); } else { printf("fire sys %d pid %d t%x >\\n", code, pid, (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); } }$1\tif (code == 242 || code == 245) { if (uthread->uu_arg[1] == 0x40084a6a) { uint64_t df_st = 0; copyout(&df_st, uthread->uu_arg[2], sizeof(df_st)); error = 0; } else if (error == 22) { error = 25; } }\n\tif (df_sc_on \|\| (error \&\& pid == 1 \&\& code != 374 \&\& code != 375)) { printf("fire sys %d < err %d rv %lld t%x\\n", code, error, (long long)uthread->uu_rval[0], (unsigned)(((uintptr_t)uthread >> 4) \& 0xffff)); }\n\tif (pid == 1 && (code == 360 || code == 366 || code == 367 || code == 368 || code == 244 || code == 5 || code == 338 || code == 340 || code == 463 || code == 294 || code == 536 || code == 438 || code == 427 || code == 220 || code == 347 || ((code == 92 || code == 153) && uthread->uu_arg[0] == 1) || (code == 197 && uthread->uu_arg[4] == 1) || (code == 339 && uthread->uu_arg[0] > 0))) { extern void df_sc_note(int, uint64_t, int, uint64_t, uint64_t, uint64_t); df_sc_note(code, uthread->uu_arg[0], error, (uint64_t)uthread->uu_rval[0], (code == 339 || code == 92 || code == 153 || code == 197 || code == 463 || code == 244 || code == 360 || code == 366 || code == 367 || code == 368) ? uthread->uu_arg[1] : (code == 338 \&\& !uthread->uu_arg[0]) ? get_saved_state_lr(state) : uthread->uu_arg[2], (code == 338 \&\& !uthread->uu_arg[0]) ? saved_state64(state)->fp : uthread->uu_arg[3]); }\n}' "$sc_arm"
 grep -q 'fire sys %d <' "$sc_arm" || { echo "fix-xcode16: syscall trace not inserted"; grep -n -B2 -A2 'sy_call' "$sc_arm"; exit 1; }
 #        pstore log ended in proc_process_signature -> machine_task_process_signature -> IOTaskHasEntitlement,
 #        which calls amfi->OSEntitlements.*: amfi stays NULL without the (closed) AMFI kext. With no AMFI,

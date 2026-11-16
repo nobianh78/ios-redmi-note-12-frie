@@ -1324,7 +1324,7 @@ perl -0pi -e 's|(\n(\s*)strlcpy\(buf, PE_boot_args\(\), BOOT_LINE_LENGTH\);\n)|$
 grep -q 'no restore mode for launchd' "$ksys_c" || { echo "fix-xcode16: bootargs rd= hide not inserted"; grep -n 'PE_boot_args()' "$ksys_c"; exit 1; }
 #        spec_vnops.c: mount-phase-1 runs mount_hfs on the live root; it opens /dev/emmc_super read-only and gets EBUSY. Allow read-only opens of a mounted block device.
 spec_c="$src/bsd/miscfs/specfs/spec_vnops.c"
-perl -0pi -e 's{if \(\(error = vfs_mountedon\(vp\)\)\) \{}{if ((ap->a_mode \& FWRITE) \&\& (error = vfs_mountedon(vp))) { /* fix-xcode16: RO open of mounted root */}' "$spec_c"
+perl -0pi -e 's|if \(\(error = vfs_mountedon\(vp\)\)\) \{|if ((ap->a_mode \& FWRITE) \&\& (error = vfs_mountedon(vp))) { /* fix-xcode16: RO open of mounted root */|' "$spec_c"
 grep -q 'RO open of mounted root' "$spec_c" || { echo "fix-xcode16: spec_open mountedon patch missing"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"

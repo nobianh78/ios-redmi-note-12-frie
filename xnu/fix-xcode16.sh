@@ -468,7 +468,7 @@ static uint64_t df_cons_last;
 void
 df_cons_write(const char *s, int n)
 {
-	df_cons_last = mach_absolute_time();
+	__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_cons_last));
 	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, top = 60, rows = (2400 - 60) / 18, cols = 1080 / 16;   /* 130 lines x 67 cols, 2x font */
 	if (df_wdt) {
@@ -535,10 +535,7 @@ df_cons_write(const char *s, int n)
  * fire bring-up: IRQ status line at row 1300 (just above the log): total IRQs, last INTID, timer
  * IRQs, CNTV_CTL_EL0. Tells whether the virtual timer interrupt (PPI 27) actually arrives.
  */
-#include <arm/cpu_data_internal.h>
-#include <mach/arm/thread_status.h>
-#include <mach/vm_param.h>
-static uint64_t df_cons_last;   /* mach time of the last console write: a 5 s gap = hang, see df_irq_stat */
+uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps;   /* interrupted context, set by sleh_irq for the hang report */
 static uint64_t df_irq_count, df_irq_timer, df_irq_done, df_irq_last;
 uint32_t df_wq_cnt[5];   /* pid 1 workqueue: creator calls, no req admitted, new threads, create fails, thread runs */
 void df_irq_stat(uint32_t id);
@@ -553,18 +550,14 @@ df_irq_stat(uint32_t id)
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
 	if ((id == 27 || id == 30) && df_cons_last) {   /* hang report: where the interrupted CPU was, every 5 s of silence */
-		uint64_t df_ns = 0;
-		absolutetime_to_nanoseconds(mach_absolute_time() - df_cons_last, &df_ns);
-		if (df_ns > 5000000000ull) {
-			arm_saved_state_t *df_st = getCpuDatap()->cpu_int_state;
+		uint64_t df_now, df_frq;
+		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
+		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(df_frq));
+		if (df_frq && df_now - df_cons_last > 5 * df_frq) {
+			extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps;
+			extern vm_offset_t vm_kernel_slide;
 			char df_b[160];
-			uint64_t df_pc = 0, df_lr = 0, df_fp = 0, df_ps = 0;
-			if (df_st) {
-				df_pc = get_saved_state_pc(df_st);
-				df_lr = get_saved_state_lr(df_st);
-				df_fp = get_saved_state_fp(df_st);
-				df_ps = get_saved_state_cpsr(df_st);
-			}
+			uint64_t df_pc = df_irq_pc, df_lr = df_irq_lr, df_fp = df_irq_fp, df_ps = df_irq_ps;
 			int df_l = snprintf(df_b, sizeof(df_b), "HANG pc %llx lr %llx cpsr %llx slide %lx\n",
 			    df_pc, df_lr, df_ps, (unsigned long)vm_kernel_slide);
 			df_cons_write(df_b, df_l);
@@ -1269,7 +1262,7 @@ grep -q 'fire kt i=' "$kalloc_c" || { echo "fix-xcode16: kalloc_type diagnostic 
 #        Non-secure kernel gets it as a Group 1 IRQ (LK already left Group 1 enabled). Ack the GIC in
 #        sleh_irq: timer PPIs (27 virtual, 30 physical) go to rtclock_intr exactly as sleh_fiq does.
 sleh_c="$src/osfmk/arm64/sleh.c"
-perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
+perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\t{ extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps; df_irq_pc = get_saved_state_pc(state); df_irq_lr = get_saved_state_lr(state); df_irq_fp = get_saved_state_fp(state); df_irq_ps = get_saved_state_cpsr(state); }\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 #        Log EL0 exceptions (SVC = syscalls of PID 1, aborts = its faults)
 perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && ((class != 0x15 && class != 0x20 && class != 0x24) \|\| (far >> 48) != 0)) { df_n++; /* screen filter: real faults only, not SVC or demand paging */ printf("fire el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) printf("fire el0 regs x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"

@@ -1439,7 +1439,7 @@ perl -0pi -e 's|(\n\tassert\(codeCnt > 0\);\n)|$1\tif (task_pid(task) > 1) { pri
 grep -q 'printf("EXC %d pid' "$exc_c" || { echo "fix-xcode16: exception trace missing"; exit 1; }
 #        vm_unix.c: ObjC processes crash in _objc_map_images (objc "hash table corrupted") with a random
 #        shared cache slide; test with slide 0 (cache pointers then need no rebasing).
-perl -0pi -e 's|(\n\t\tslide_amount = 0;\n\t\}\n#endif /\* DEVELOPMENT \|\| DEBUG \*/\n)|$1\tslide_amount = 0; /* fix-xcode16: no shared cache ASLR (slide test) */\n|' "$src/bsd/vm/vm_unix.c"
+perl -0pi -e 's{(\n\t\tslide_amount = 0;\n\t\}\n#endif /\* DEVELOPMENT \|\| DEBUG \*/\n)}{$1\tslide_amount = 0; /* fix-xcode16: no shared cache ASLR (slide test) */\n}' "$src/bsd/vm/vm_unix.c"
 grep -q 'no shared cache ASLR' "$src/bsd/vm/vm_unix.c" || { echo "fix-xcode16: shared cache slide-0 patch missing"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"

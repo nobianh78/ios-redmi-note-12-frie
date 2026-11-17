@@ -281,6 +281,11 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     uint64_t off = p->virt_base & (L2_BLOCK - 1);
     uint64_t phys_base = ((src + len - off + L2_BLOCK - 1) & ~(L2_BLOCK - 1)) + off;
     if (phys_base + len + 0x8000 > XNU_RAM_END) { fbcon_puts("no room to relocate kernel\n"); return 0; }
+    /* scan LK's FDT for reservations BEFORE the copy: a large payload overwrites the FDT at 0x4bc80000 */
+    g_rsv_lo = phys_base; g_rsv_hi = video->base < XNU_RAM_END ? video->base : XNU_RAM_END; g_rsv_bad = 0;
+    if (g_fdt) fdt_list_reserved(g_fdt, ~0ull, rsv_note);
+    uint64_t mem = (g_rsv_hi - phys_base) & ~0x3fffull;
+    if (g_rsv_bad || !g_fdt || mem < XNU_SAFE_RAM) mem = XNU_SAFE_RAM;
     for (uint64_t i = 0; i < len; i += 8) *(volatile uint64_t *)(phys_base + i) = *(volatile uint64_t *)(src + i);
     __asm__ volatile("dsb sy" ::: "memory");
     fbcon_puts("relocated "); fbcon_hex(src); fbcon_puts(" -> "); fbcon_hex(phys_base); fbcon_putc('\n');
@@ -298,10 +303,6 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     /* XNU stopped inside arm_vm_init with ~950 MB that still contains MTK carve-outs (TEE/ATF/modem,
      * addresses unknown without root). Hand it only 128 MB from physBase: that span holds just LK's
      * leftovers (ramdisk 0x47c80000, FDT 0x4bc80000 is above it), which XNU may overwrite. */
-    g_rsv_lo = phys_base; g_rsv_hi = video->base < XNU_RAM_END ? video->base : XNU_RAM_END; g_rsv_bad = 0;
-    if (g_fdt) fdt_list_reserved(g_fdt, ~0ull, rsv_note);
-    uint64_t mem = (g_rsv_hi - phys_base) & ~0x3fffull;
-    if (g_rsv_bad || !g_fdt || mem < XNU_SAFE_RAM) mem = XNU_SAFE_RAM;
     ba->memSize          = mem;
     fbcon_puts("memSize: "); fbcon_hex(ba->memSize); fbcon_putc('\n');
     ba->topOfKernelData  = PAGE16K(ba_phys + sizeof(*ba));

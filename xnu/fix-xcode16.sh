@@ -463,6 +463,57 @@ df_ln_recolor(volatile uint32_t *fb)
 	}
 	df_ln_n = 0;
 }
+/* USB serial filter, per line: the first 6 chars decide whether a line is kernel debug output (dropped
+ * from COM6, still drawn on the LCD) or shell/tty output (passed through). */
+static char df_ub[8];
+static int df_ub_n, df_ub_st;   /* st: 0 = collecting the line prefix, 1 = pass, 2 = drop */
+static void
+df_usb_raw(char c)
+{
+	if (c == '\n') {
+		df_usb_putc('\r');      /* terminals want CRLF */
+	}
+	df_usb_putc(c);
+}
+static int
+df_ub_is_debug(void)
+{
+	static const char *const pre[] = { "fire ", "fire:", "hfsw ", "kev ch", "HANG", "emmc", "sc ", "com.ap", "  fff", " fr", NULL };
+	for (int i = 0; pre[i]; i++) {
+		int k = 0;
+		while (pre[i][k] && k < df_ub_n && df_ub[k] == pre[i][k]) {
+			k++;
+		}
+		if (!pre[i][k] || (k == df_ub_n && df_ub[df_ub_n - 1] != '\n' && 0)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+static void
+df_usb_line(char c)
+{
+	if (df_ub_st == 1) {
+		df_usb_raw(c);
+	} else if (df_ub_st == 0) {
+		df_ub[df_ub_n++] = c;
+		if (c == '\n' || df_ub_n == 6) {
+			if (df_ub_is_debug()) {
+				df_ub_st = 2;
+			} else {
+				for (int i = 0; i < df_ub_n; i++) {
+					df_usb_raw(df_ub[i]);
+				}
+				df_ub_st = 1;
+			}
+			df_ub_n = 0;
+		}
+	}
+	if (c == '\n') {
+		df_ub_st = 0;
+		df_ub_n = 0;
+	}
+}
 void df_cons_write(const char *s, int n);
 static uint64_t df_cons_last;
 void
@@ -478,10 +529,7 @@ df_cons_write(const char *s, int n)
 	for (int i = 0; i < n; i++) {
 		char c = s[i];
 		df_ps_put(c);
-		if (c == '\n') {
-			df_usb_putc('\r');      /* terminals want CRLF */
-		}
-		df_usb_putc(c);
+		df_usb_line(c);   /* COM6 gets the shell, not the kernel debug lines (LCD keeps everything) */
 		if (c == '\n' || df_con_col == cols) {
 			df_ln_recolor(fb);
 			df_con_col = 0;
@@ -549,7 +597,7 @@ df_irq_stat(uint32_t id)
 	uint64_t ctl, tval;
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
-	if ((id == 27 || id == 30) && df_cons_last) {   /* hang report: where the interrupted CPU was, every 5 s of silence */
+	if (0 && (id == 27 || id == 30) && df_cons_last) {   /* HANG reporter off: idle WFI gave false reports */   /* hang report: where the interrupted CPU was, every 5 s of silence */
 		uint64_t df_now, df_frq;
 		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
 		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(df_frq));

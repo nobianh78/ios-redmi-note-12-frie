@@ -48,6 +48,9 @@ IOMobileFramebuffer::start(IOService *provider)
 	setProperty("IOMFBBrightnessLevel", 0x10000, 32);
 	setProperty("external", false);
 	setProperty("IOUserClientClass", "DFMobileFramebufferUC");
+	setName("disp0");
+	setProperty("primary-display", kOSBooleanTrue);
+	setProperty("display-id", (uint64_t)0, 32);
 	registerService();
 	printf("mfb: IOMobileFramebuffer %dx%d at 0x%llx registered\n", DF_MFB_W, DF_MFB_H, DF_MFB_PHYS);
 	return true;

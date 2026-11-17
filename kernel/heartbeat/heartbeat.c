@@ -225,7 +225,8 @@ struct xnu_payload {
 /* shortcut: XNU gets one contiguous RAM range from physBase up to just below the framebuffer;
  * MTK reserved carve-outs (TEE/ATF/modem) inside it are not excluded yet. Feed them via the ADT once XNU gets that far. */
 #define XNU_RAM_END   0x7c000000ull
-#define XNU_SAFE_RAM  0x8000000ull   /* 128 MB handed to XNU; see boot_xnu() */
+#define XNU_SAFE_RAM  0x8000000ull   /* minimum handed to XNU; see boot_xnu() */
+#define XNU_ATF_BASE  0x54600000ull  /* MT6768 ATF reservation: XNU RAM stops below it */
 
 extern void xnu_jump(uint64_t entry_phys, uint64_t boot_args_phys);
 extern char exc_vectors[];
@@ -282,10 +283,11 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     uint64_t phys_base = ((src + len - off + L2_BLOCK - 1) & ~(L2_BLOCK - 1)) + off;
     if (phys_base + len + 0x8000 > XNU_RAM_END) { fbcon_puts("no room to relocate kernel\n"); return 0; }
     /* scan LK's FDT for reservations BEFORE the copy: a large payload overwrites the FDT at 0x4bc80000 */
-    g_rsv_lo = phys_base; g_rsv_hi = video->base < XNU_RAM_END ? video->base : XNU_RAM_END; g_rsv_bad = 0;
-    if (g_fdt) fdt_list_reserved(g_fdt, ~0ull, rsv_note);
-    uint64_t mem = (g_rsv_hi - phys_base) & ~0x3fffull;
-    if (g_rsv_bad || !g_fdt || mem < XNU_SAFE_RAM) mem = XNU_SAFE_RAM;
+    /* LK's FDT scan hangs here, and the Android DTB's carve-outs are all dynamic (Linux allocates them, we
+     * never run Linux). Stop below the usual MT6768 ATF base (0x54600000): ~278 MB instead of 128 MB.
+     * shortcut: fixed limit, verify against the real preloader/ATF layout if XNU ever faults in high RAM */
+    uint64_t mem = phys_base < XNU_ATF_BASE ? (XNU_ATF_BASE - phys_base) & ~0x3fffull : 0;
+    if (mem < XNU_SAFE_RAM) mem = XNU_SAFE_RAM;
     for (uint64_t i = 0; i < len; i += 8) *(volatile uint64_t *)(phys_base + i) = *(volatile uint64_t *)(src + i);
     __asm__ volatile("dsb sy" ::: "memory");
     fbcon_puts("relocated "); fbcon_hex(src); fbcon_puts(" -> "); fbcon_hex(phys_base); fbcon_putc('\n');
@@ -464,7 +466,7 @@ void heartbeat_main(uint64_t fdt_addr) {
     /* One-off diagnostic: XNU's zone setup sees its stack change under it; list what LK reserved in
      * the low 512 MB (XNU gets 0x41004000 + 128 MB) and stop here instead of booting XNU. */
     fbcon_puts("\nreserved < 0x60000000:\n");
-    if (!fdt_list_reserved((const uint8_t *)fdt_addr, 0x60000000ull, show_region)) fbcon_puts(" none\n");
+    if (!fdt_list_reserved((const uint8_t *)fdt_addr, 0x80000000ull, show_region)) fbcon_puts(" none\n");
     idle_forever(40);
 #endif
     boot_xnu(PAGE16K((uint64_t)_image_end), &video);

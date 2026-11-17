@@ -226,7 +226,7 @@ struct xnu_payload {
  * MTK reserved carve-outs (TEE/ATF/modem) inside it are not excluded yet. Feed them via the ADT once XNU gets that far. */
 #define XNU_RAM_END   0x7c000000ull
 #define XNU_SAFE_RAM  0x8000000ull   /* minimum handed to XNU; see boot_xnu() */
-#define XNU_ATF_BASE  0x54600000ull  /* MT6768 ATF reservation: XNU RAM stops below it */
+#define XNU_ATF_BASE  0x4b004000ull  /* TEST: back to 128 MB (random RAM corruption above?) */ //  /* MT6768 ATF reservation: XNU RAM stops below it */
 
 extern void xnu_jump(uint64_t entry_phys, uint64_t boot_args_phys);
 extern char exc_vectors[];

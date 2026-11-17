@@ -87,6 +87,13 @@ DFMobileFramebufferUC::externalMethod(uint32_t selector, IOExternalMethodArgumen
 	if (a->structureOutput && a->structureOutputSize) {
 		bzero(a->structureOutput, a->structureOutputSize);
 	}
+	if (selector == 8 && a->scalarOutputCount >= 2) {   /* display size (guess) */
+		a->scalarOutput[0] = DF_MFB_W;
+		a->scalarOutput[1] = DF_MFB_H;
+	}
+	if (selector == 28 && a->scalarOutputCount >= 1) {  /* active flag (guess) */
+		a->scalarOutput[0] = 1;
+	}
 	return kIOReturnSuccess;
 }
 

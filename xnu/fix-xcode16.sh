@@ -1437,6 +1437,10 @@ done
 exc_c="$src/osfmk/kern/exception.c"
 perl -0pi -e 's|(\n\tassert\(codeCnt > 0\);\n)|$1\tif (task_pid(task) > 1) { printf("EXC %d pid %d codes 0x%llx 0x%llx\\n", exception, task_pid(task), (unsigned long long)code[0], (unsigned long long)(codeCnt > 1 ? code[1] : 0)); } /* fix-xcode16 */\n|' "$exc_c"
 grep -q 'printf("EXC %d pid' "$exc_c" || { echo "fix-xcode16: exception trace missing"; exit 1; }
+#        vm_unix.c: ObjC processes crash in _objc_map_images (objc "hash table corrupted") with a random
+#        shared cache slide; test with slide 0 (cache pointers then need no rebasing).
+perl -0pi -e 's|(\n\t\tslide_amount = 0;\n\t\}\n#endif /\* DEVELOPMENT \|\| DEBUG \*/\n)|$1\tslide_amount = 0; /* fix-xcode16: no shared cache ASLR (slide test) */\n|' "$src/bsd/vm/vm_unix.c"
+grep -q 'no shared cache ASLR' "$src/bsd/vm/vm_unix.c" || { echo "fix-xcode16: shared cache slide-0 patch missing"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"
 perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (0 \&\& p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } if (p \&\& proc_getpid(p) == 1) DF_WQ(0); /* fix-xcode16 wq */\n}' "$wq_c"

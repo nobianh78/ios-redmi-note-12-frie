@@ -1431,6 +1431,11 @@ for op in read write; do
 perl -0pi -e "s|(\n\t_err = \(\*vp->v_op\[vnop_${op}_desc.vdesc_offset\]\)\(&a\);\n)|\n\tint df_vt = 0 \&\& vnode_vtype(vp) == VREG; static int df_vn_${op}; df_vt = df_vt \&\& df_vn_${op}++ < 3000; if (df_vt) { printf(\"fire vnop ${op} > pid %d sz %lld\\\\n\", proc_selfpid(), (long long)uio_resid(uio)); }\$1\tif (df_vt) { printf(\"fire vnop ${op} < err %d\\\\n\", _err); } /* fix-xcode16 vnop trace */\n|" "$kpi_c"
 done
 [ "$(grep -c 'fix-xcode16 vnop trace' "$kpi_c")" = 2 ] || { echo "fix-xcode16: vnop trace not inserted"; exit 1; }
+#        exception.c: daemons (backboardd, SpringBoard) die by a Mach exception with no abort reason; print
+#        type and codes (EXC_BAD_ACCESS: kern code + address, EXC_BREAKPOINT: code + pc) for user tasks.
+exc_c="$src/osfmk/kern/exception.c"
+perl -0pi -e 's|(\n\tassert\(codeCnt > 0\);\n)|$1\tif (task_pid(task) > 1) { printf("EXC %d pid %d codes 0x%llx 0x%llx\\n", exception, task_pid(task), (unsigned long long)code[0], (unsigned long long)(codeCnt > 1 ? code[1] : 0)); } /* fix-xcode16 */\n|' "$exc_c"
+grep -q 'printf("EXC %d pid' "$exc_c" || { echo "fix-xcode16: exception trace missing"; exit 1; }
 #        pthread_workqueue.c: launchd's eventq block never runs; trace creator scheduling + thread creation for pid 1
 wq_c="$src/bsd/pthread/pthread_workqueue.c"
 perl -0pi -e 's{(\nagain:\n\tuth = wq->wq_creator;\n)}{$1\t{ static int df_n; if (0 \&\& p \&\& proc_getpid(p) == 1 \&\& df_n++ < 60) printf("fire wq sc rq %d idle %d n %d max %d cr %d fl %x\\n", wq->wq_reqcount, wq->wq_thidlecount, wq->wq_nthreads, wq_max_threads, uth != NULL, flags); } if (p \&\& proc_getpid(p) == 1) DF_WQ(0); /* fix-xcode16 wq */\n}' "$wq_c"

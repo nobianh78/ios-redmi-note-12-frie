@@ -1329,7 +1329,8 @@ perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_o
 perl -0pi -e 's|(#include <vm/vm_kern.h>\n)|$1#include <vm/vm_shared_region.h> /* fix-xcode16: slide for the SEGV report */\n|' "$sleh_c"
 #        sleh.c handle_user_abort: report only user faults the VM could NOT resolve (COW faults are normal).
 perl -0pi -e 's{(\n\t\tcodes\[0\] = result;\n\t\} else if \(is_alignment_fault\(fault_code\)\) \{)}{\n\t\tif (result != KERN_SUCCESS) { extern int proc_selfpid(void); printf("UFAULT pid %d kr %d far 0x%llx pc 0x%llx lr 0x%llx\\n", proc_selfpid(), result, (unsigned long long)fault_addr, (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state)); } /* fix-xcode16 */$1}' "$sleh_c"
-grep -q 'printf("UFAULT pid' "$sleh_c" || { echo "fix-xcode16: UFAULT report missing"; exit 1; }grep -q 'SEGV el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
+grep -q 'printf("UFAULT pid' "$sleh_c" || { echo "fix-xcode16: UFAULT report missing"; exit 1; }
+grep -q 'SEGV el0#' "$sleh_c" || { echo "fix-xcode16: EL0 exception log not inserted"; grep -n -A4 '^sleh_synchronous' "$sleh_c"; exit 1; }
 #        Bring-up traces of the launchd exec / first-syscall hangs (EL0 trap, exec steps, process_signature,
 #        SVC path, open path, mockfs vnops) are gone: the fixes they led to are the AMFI guards below and the
 #        console_write early return. Kept: the execve result line.

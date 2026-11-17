@@ -273,7 +273,7 @@ dfe_dma_init(uint32_t bench_lba)
 		printf("emmc: DMA benchmark failed %d, staying on PIO\n", rc);
 		return;
 	}
-	dfe_dma_ok = 1;
+	dfe_dma_ok = 0;   /* TEST: PIO only - random objc/shared-cache corruption under DMA? */
 	printf("emmc: DMA on (rst %d, buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
 	    dfe_dma_rst, dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
 }

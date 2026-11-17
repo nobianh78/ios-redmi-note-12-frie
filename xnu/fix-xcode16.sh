@@ -478,7 +478,7 @@ df_usb_raw(char c)
 static int
 df_ub_is_debug(void)
 {
-	static const char *const pre[] = { "fire ", "fire:", "hfsw ", "kev ch", "HANG", "emmc", "sc ", "com.ap", "  fff", " fr", NULL };
+	static const char *const pre[] = { "fire ", "fire:", "hfsw ", "kev ch", "HANG", "emmc", "sc ", "com.ap", "  fff", " fr", 0 };
 	for (int i = 0; pre[i]; i++) {
 		int k = 0;
 		while (pre[i][k] && k < df_ub_n && df_ub[k] == pre[i][k]) {

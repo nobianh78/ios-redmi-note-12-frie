@@ -262,6 +262,7 @@ static unsigned df_ps_early_n;
 static void
 df_ps_put(char c)
 {
+	return;   /* pstore off: ramoops 0x4d09f000 lies inside XNU's RAM, writes there corrupted live pages */
 	if (!df_ps) {
 		if (df_ps_early_n < sizeof(df_ps_early)) {
 			df_ps_early[df_ps_early_n++] = c;

@@ -226,7 +226,8 @@ struct xnu_payload {
  * MTK reserved carve-outs (TEE/ATF/modem) inside it are not excluded yet. Feed them via the ADT once XNU gets that far. */
 #define XNU_RAM_END   0x7c000000ull
 #define XNU_SAFE_RAM  0x8000000ull   /* minimum handed to XNU; see boot_xnu() */
-#define XNU_ATF_BASE  0x4b004000ull  /* TEST: back to 128 MB (random RAM corruption above?) */ //  /* MT6768 ATF reservation: XNU RAM stops below it */
+#define XNU_ATF_BASE  0x70000000ull  /* RAM scan: something rewrites 0x70000000..0x76000000; XNU RAM stops below it */
+#define XNU_RAM_LO    0x4ce60000ull  /* RAM scan: 0x4ce00000..0x4ce60000 is rewritten live; XNU RAM starts above it */
 
 extern void xnu_jump(uint64_t entry_phys, uint64_t boot_args_phys);
 extern char exc_vectors[];
@@ -280,7 +281,8 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     const uint64_t L2_BLOCK = 0x2000000ull;
     uint64_t len = p->adt_offset + p->adt_size - PAYLOAD_HDR;
     uint64_t off = p->virt_base & (L2_BLOCK - 1);
-    uint64_t phys_base = ((src + len - off + L2_BLOCK - 1) & ~(L2_BLOCK - 1)) + off;
+    uint64_t lo = src + len > XNU_RAM_LO ? src + len : XNU_RAM_LO;   /* above the coprocessor-written hole */
+    uint64_t phys_base = ((lo - off + L2_BLOCK - 1) & ~(L2_BLOCK - 1)) + off;
     if (phys_base + len + 0x8000 > XNU_RAM_END) { fbcon_puts("no room to relocate kernel\n"); return 0; }
     /* scan LK's FDT for reservations BEFORE the copy: a large payload overwrites the FDT at 0x4bc80000 */
     /* LK's FDT scan hangs here, and the Android DTB's carve-outs are all dynamic (Linux allocates them, we
@@ -399,6 +401,31 @@ static int xnu_log_pending(void) {
     return 1;
 }
 
+#ifdef RAMSCAN
+/* One-off: fill [lo,hi) with an address pattern, wait, verify; print ranges something else rewrote
+ * (coprocessors/DMA still running from preloader/LK) so XNU can avoid them. */
+static void ram_scan(uint64_t lo, uint64_t hi) {
+    fbcon_puts("\nRAM scan "); fbcon_hex(lo); fbcon_puts(".."); fbcon_hex(hi); fbcon_putc('\n');
+    for (uint64_t a = lo; a < hi; a += 8) *(volatile uint64_t *)a = a ^ 0x5a5aa5a5c3c33c3cull;
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint64_t frq = cntfrq(), t0 = cntvct();
+    while (cntvct() - t0 < 5 * frq) { }
+    int nr = 0;
+    uint64_t run = 0, last = 0;
+    for (uint64_t a = lo; a < hi; a += 0x1000) {   /* one probe word per 4K page, plus its last word */
+        int bad = *(volatile uint64_t *)a != (a ^ 0x5a5aa5a5c3c33c3cull) ||
+                  *(volatile uint64_t *)(a + 0xff8) != ((a + 0xff8) ^ 0x5a5aa5a5c3c33c3cull);
+        if (bad && !run) run = a;
+        if (!bad && run) {
+            if (nr++ < 24) { fbcon_puts(" bad "); fbcon_hex(run); fbcon_puts(".."); fbcon_hex(a); fbcon_putc('\n'); }
+            run = 0;
+        }
+        last = a;
+    }
+    if (run && nr++ < 24) { fbcon_puts(" bad "); fbcon_hex(run); fbcon_puts(".."); fbcon_hex(last + 0x1000); fbcon_putc('\n'); }
+    fbcon_puts("scan done, bad ranges: "); fbcon_dec(nr); fbcon_putc('\n');
+}
+#endif
 void heartbeat_main(uint64_t fdt_addr) {
     struct layer ovl0[4], ovl2l[4];
     uint32_t en0 = read_ovl(0x1400b000ull, ovl0);
@@ -468,6 +495,10 @@ void heartbeat_main(uint64_t fdt_addr) {
     fbcon_puts("\nreserved < 0x60000000:\n");
     if (!fdt_list_reserved((const uint8_t *)fdt_addr, 0x80000000ull, show_region)) fbcon_puts(" none\n");
     idle_forever(40);
+#endif
+#ifdef RAMSCAN
+    ram_scan(0x4b004000ull, 0x7c000000ull);
+    idle_forever(60);
 #endif
     boot_xnu(PAGE16K((uint64_t)_image_end), &video);
     boot_xnu(initrd, &video);

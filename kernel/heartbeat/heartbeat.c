@@ -232,6 +232,16 @@ extern char exc_vectors[];
 extern char _image_end[];   /* runtime address via adr; the appended XNU payload starts at the next 16K page */
 
 static uint64_t g_phys_base, g_virt_base, g_kernel_size;
+/* RAM size for XNU: from physBase up to the first LK reservation (reserved-memory reg, memreserve) or the
+ * framebuffer above it. 128 MB starved iOS userland (launchd hangs in vm_page_wait-like stalls). */
+static const uint8_t *g_fdt;
+static uint64_t g_rsv_lo, g_rsv_hi, g_rsv_bad;
+static void rsv_note(const char *name, uint64_t a, uint64_t s) {
+    (void)name;
+    if (!s) return;
+    if (a < g_rsv_lo && a + s > g_rsv_lo) g_rsv_bad = 1;          /* overlaps physBase itself: unsafe */
+    else if (a >= g_rsv_lo && a < g_rsv_hi) g_rsv_hi = a;
+}
 
 /* Called from start.S vectors: something faulted before XNU installed its own vectors. */
 void exc_report(uint64_t idx, uint64_t esr, uint64_t elr, uint64_t far) {
@@ -288,7 +298,11 @@ static int boot_xnu(uint64_t initrd, const struct fb_surface *video) {
     /* XNU stopped inside arm_vm_init with ~950 MB that still contains MTK carve-outs (TEE/ATF/modem,
      * addresses unknown without root). Hand it only 128 MB from physBase: that span holds just LK's
      * leftovers (ramdisk 0x47c80000, FDT 0x4bc80000 is above it), which XNU may overwrite. */
-    ba->memSize          = XNU_SAFE_RAM;
+    g_rsv_lo = phys_base; g_rsv_hi = video->base < XNU_RAM_END ? video->base : XNU_RAM_END; g_rsv_bad = 0;
+    if (g_fdt) fdt_list_reserved(g_fdt, ~0ull, rsv_note);
+    uint64_t mem = (g_rsv_hi - phys_base) & ~0x3fffull;
+    if (g_rsv_bad || !g_fdt || mem < XNU_SAFE_RAM) mem = XNU_SAFE_RAM;
+    ba->memSize          = mem;
     fbcon_puts("memSize: "); fbcon_hex(ba->memSize); fbcon_putc('\n');
     ba->topOfKernelData  = PAGE16K(ba_phys + sizeof(*ba));
     ba->video.v_baseAddr = video->base;
@@ -441,6 +455,7 @@ void heartbeat_main(uint64_t fdt_addr) {
 
     /* XNU payload: appended after this image inside the gzip'd kernel (LK rejects a 49 MB ramdisk),
      * else in the ramdisk. boot_xnu returns only if there is no valid payload. */
+    g_fdt = (const uint8_t *)fdt_addr;
     uint64_t initrd = 0;
     fdt_u64((const uint8_t *)fdt_addr, "chosen", "linux,initrd-start", &initrd);
     fbcon_puts("initrd: "); fbcon_hex(initrd); fbcon_putc('\n');

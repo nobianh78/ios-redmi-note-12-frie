@@ -176,6 +176,30 @@ DFCoreSurfaceUC::clientClose(void)
 	return kIOReturnSuccess;
 }
 
+/* fix-xcode16 P6: log IOKit matching dictionaries looked up by backboardd (which display does QuartzCore want?) */
+extern "C" struct proc *current_proc(void);
+extern "C" const char *proc_best_name(struct proc *);
+static unsigned df_ml;
+
+extern "C" void
+df_match_log(const char *where, OSDictionary *m)
+{
+	if (!m) {
+		return;
+	}
+	const char *n = proc_best_name(current_proc());
+	if (!n || strcmp(n, "backboardd") != 0 || df_ml++ > 80) {
+		return;
+	}
+	OSSerialize *s = OSSerialize::withCapacity(512);
+	if (s && m->serialize(s)) {
+		printf("MATCH %s %s\n", where, s->text());
+	}
+	if (s) {
+		s->release();
+	}
+}
+
 extern "C" void
 df_mfb_attach(IOService *provider)
 {

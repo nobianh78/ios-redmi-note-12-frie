@@ -1096,6 +1096,10 @@ perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n
 perl -0pi -e 's|^|extern "C" void ml_set_max_cpus(unsigned int); /* fix-xcode16 */\n|' "$pe_cpp"
 perl -0pi -e 's|^|extern "C" void df_mfb_attach(class IOService *); /* fix-xcode16 P6 */\n|' "$pe_cpp"
 cat "$(dirname "$0")/df_mfb.cpp" >> "$pe_cpp"
+#        P6: log matching dictionaries backboardd asks IOKit for
+perl -0pi -e 's/(\nIOService::getMatchingServices\(\s*OSDictionary\s*\*\s*matching\s*\)\s*\{\n)/$1\tdf_match_log("get", matching); \/\* fix-xcode16 P6 \*\/\n/; s/(\nIOService::copyMatchingService\(\s*OSDictionary\s*\*\s*matching\s*\)\s*\{\n)/$1\tdf_match_log("copy", matching); \/\* fix-xcode16 P6 \*\/\n/; s/(\nIOService::addMatchingNotification\(\s*const OSSymbol\s*\*\s*type,\s*OSDictionary\s*\*\s*matching,[^{;]*?SInt32\s+priority\s*\)\s*\{\n)/$1\tdf_match_log("notify", matching); \/\* fix-xcode16 P6 \*\/\n/g; s/^/extern "C" void df_match_log(const char *, class OSDictionary *); \/\* fix-xcode16 P6 \*\/\n/' "$src/iokit/Kernel/IOService.cpp"
+grep -c 'df_match_log("' "$src/iokit/Kernel/IOService.cpp" | grep -qv '^0$' || { echo "fix-xcode16: df_match_log hooks missing"; grep -n -A2 '^IOService::getMatchingServices\|^IOService::copyMatchingService\|^IOService::addMatchingNotification' "$src/iokit/Kernel/IOService.cpp"; exit 1; }
+echo "fix-xcode16: df_match_log hooks: $(grep -c 'df_match_log("' "$src/iokit/Kernel/IOService.cpp")"
 grep -q 'df_mfb_attach(this)' "$pe_cpp" || { echo "fix-xcode16: df_mfb not hooked"; exit 1; }
 grep -q 'using generic IOPlatformExpert' "$pe_cpp" || { echo "fix-xcode16: IOPanicPlatform not patched"; grep -n -A8 'IOPanicPlatform::start' "$pe_cpp"; exit 1; }
 #        Return real Apple hardware target & product name for iOS 16 launchd (iPhone X: d221ap / iPhone10,6)

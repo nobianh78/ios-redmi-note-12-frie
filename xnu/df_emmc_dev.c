@@ -536,3 +536,35 @@ df_watch_start(void)
 	clock_interval_to_deadline(30, NSEC_PER_SEC, &dl);
 	thread_call_enter_delayed(dfw_tc, dl);
 }
+
+/* fix-xcode16 P6: sample backboardd's user PC/LR on timer IRQs (ring of 64), dumped when ps exits. */
+extern const char *proc_best_name(proc_t);
+uint64_t df_bb_ring[64][2];
+unsigned df_bb_n;
+
+void
+df_bb_sample(uint64_t pc, uint64_t lr)
+{
+	const char *n = proc_best_name(current_proc());
+	if (n && strcmp(n, "backboardd") == 0) {
+		unsigned i = df_bb_n++ & 63;
+		df_bb_ring[i][0] = pc;
+		df_bb_ring[i][1] = lr;
+	}
+}
+
+void
+df_bb_dump(int pid)
+{
+	static int last;
+	if (pid == last) {
+		return;
+	}
+	last = pid;
+	unsigned n = df_bb_n;
+	printf("BBPC samples %u\n", n);
+	for (unsigned i = 0; i < 64 && i < n; i++) {
+		unsigned k = (n - 1 - i) & 63;
+		printf("BBPC pc 0x%llx lr 0x%llx\n", df_bb_ring[k][0], df_bb_ring[k][1]);
+	}
+}

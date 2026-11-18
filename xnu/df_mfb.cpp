@@ -190,7 +190,11 @@ df_match_log(const char *where, OSDictionary *m)
 	if (current_task() == kernel_task) {
 		return;   /* early boot / kernel callers: no proc yet (zone_require_ro panic) */
 	}
-	const char *n = proc_best_name(current_proc());
+	proc_t df_p = current_proc();
+	if (df_p == NULL || df_p == kernproc) {
+		return;   /* before bsd_init kernproc is NULL: proc_best_name(NULL) panics in zone_require_ro */
+	}
+	const char *n = proc_best_name(df_p);
 	if (!n || strcmp(n, "backboardd") != 0 || df_ml++ > 80) {
 		return;
 	}
@@ -210,7 +214,11 @@ df_path_log(const char *path)
 	if (current_task() == kernel_task) {
 		return;   /* early boot / kernel callers: no proc yet (zone_require_ro panic) */
 	}
-	const char *n = proc_best_name(current_proc());
+	proc_t df_p = current_proc();
+	if (df_p == NULL || df_p == kernproc) {
+		return;   /* before bsd_init kernproc is NULL: proc_best_name(NULL) panics in zone_require_ro */
+	}
+	const char *n = proc_best_name(df_p);
 	if (path && n && strcmp(n, "backboardd") == 0 && df_ml++ < 160) {
 		printf("MATCH path %s\n", path);
 	}

@@ -539,6 +539,7 @@ df_watch_start(void)
 
 /* fix-xcode16 P6: sample backboardd's user PC/LR on timer IRQs (ring of 64), dumped when ps exits. */
 uint64_t df_bb_ring[64][2];
+void *df_bb_task;
 unsigned df_bb_n;
 
 void
@@ -546,6 +547,8 @@ df_bb_sample(uint64_t pc, uint64_t lr)
 {
 	const char *n = proc_best_name(current_proc());
 	if (n && strcmp(n, "backboardd") == 0) {
+		extern void *df_bb_task;
+		df_bb_task = current_task();
 		unsigned i = df_bb_n++ & 63;
 		df_bb_ring[i][0] = pc;
 		df_bb_ring[i][1] = lr;
@@ -562,6 +565,10 @@ df_bb_dump(int pid)
 	last = pid;
 	unsigned n = df_bb_n;
 	printf("BBPC samples %u\n", n);
+	if (df_bb_task) {
+		extern void df_task_threads_dump(void *);
+		df_task_threads_dump(df_bb_task);
+	}
 	for (unsigned i = 0; i < 64 && i < n; i++) {
 		unsigned k = (n - 1 - i) & 63;
 		printf("BBPC pc 0x%llx lr 0x%llx\n", df_bb_ring[k][0], df_bb_ring[k][1]);

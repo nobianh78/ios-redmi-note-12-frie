@@ -548,7 +548,7 @@ df_bb_sample(uint64_t pc, uint64_t lr)
 	const char *n = proc_best_name(current_proc());
 	if (n && strcmp(n, "backboardd") == 0) {
 		extern void *df_bb_task;
-		df_bb_task = current_task();
+		df_bb_task = (void *)proc_task(current_proc());
 		unsigned i = df_bb_n++ & 63;
 		df_bb_ring[i][0] = pc;
 		df_bb_ring[i][1] = lr;

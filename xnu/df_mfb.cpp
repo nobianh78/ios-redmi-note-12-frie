@@ -187,6 +187,9 @@ df_match_log(const char *where, OSDictionary *m)
 	if (!m) {
 		return;
 	}
+	if (current_task() == kernel_task) {
+		return;   /* early boot / kernel callers: no proc yet (zone_require_ro panic) */
+	}
 	const char *n = proc_best_name(current_proc());
 	if (!n || strcmp(n, "backboardd") != 0 || df_ml++ > 80) {
 		return;
@@ -204,6 +207,9 @@ extern "C" void df_path_log(const char *path);
 extern "C" void
 df_path_log(const char *path)
 {
+	if (current_task() == kernel_task) {
+		return;   /* early boot / kernel callers: no proc yet (zone_require_ro panic) */
+	}
 	const char *n = proc_best_name(current_proc());
 	if (path && n && strcmp(n, "backboardd") == 0 && df_ml++ < 160) {
 		printf("MATCH path %s\n", path);

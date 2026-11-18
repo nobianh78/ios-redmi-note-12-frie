@@ -177,8 +177,7 @@ DFCoreSurfaceUC::clientClose(void)
 }
 
 /* fix-xcode16 P6: log IOKit matching dictionaries looked up by backboardd (which display does QuartzCore want?) */
-extern "C" struct proc *current_proc(void);
-extern "C" const char *proc_best_name(struct proc *);
+extern "C" void df_match_log(const char *where, OSDictionary *m);
 static unsigned df_ml;
 
 extern "C" void

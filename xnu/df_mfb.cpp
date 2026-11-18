@@ -51,6 +51,7 @@ IOMobileFramebuffer::start(IOService *provider)
 	setName("disp0");
 	setProperty("primary-display", kOSBooleanTrue);
 	setProperty("display-id", (uint64_t)0, 32);
+	setProperty("backlight-control", kOSBooleanTrue);
 	registerService();
 	printf("mfb: IOMobileFramebuffer %dx%d at 0x%llx registered\n", DF_MFB_W, DF_MFB_H, DF_MFB_PHYS);
 	return true;
@@ -196,6 +197,16 @@ df_match_log(const char *where, OSDictionary *m)
 	}
 	if (s) {
 		s->release();
+	}
+}
+
+extern "C" void df_path_log(const char *path);
+extern "C" void
+df_path_log(const char *path)
+{
+	const char *n = proc_best_name(current_proc());
+	if (path && n && strcmp(n, "backboardd") == 0 && df_ml++ < 160) {
+		printf("MATCH path %s\n", path);
 	}
 }
 

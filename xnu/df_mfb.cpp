@@ -112,9 +112,80 @@ DFMobileFramebufferUC::clientClose(void)
 	return kIOReturnSuccess;
 }
 
+/* Probe IOCoreSurfaceRoot (IOSurface.framework's kernel service on iOS): logs every selector
+ * ("ios sel ...") and answers success with zeroed output. Not a working IOSurface yet. */
+class IOCoreSurfaceRoot : public IOService
+{
+	OSDeclareDefaultStructors(IOCoreSurfaceRoot);
+public:
+	virtual IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
+};
+
+class DFCoreSurfaceUC : public IOUserClient
+{
+	OSDeclareDefaultStructors(DFCoreSurfaceUC);
+public:
+	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+};
+
+OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
+OSDefineMetaClassAndStructors(DFCoreSurfaceUC, IOUserClient);
+
+static unsigned df_ios_logs;
+
+IOReturn
+IOCoreSurfaceRoot::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
+{
+	DFCoreSurfaceUC *uc = OSTypeAlloc(DFCoreSurfaceUC);
+	if (!uc || !uc->initWithTask(owningTask, securityID, type) || !uc->attach(this) || !uc->start(this)) {
+		if (uc) {
+			uc->detach(this);
+			uc->release();
+		}
+		printf("ios: newUserClient type %u failed\n", (unsigned)type);
+		return kIOReturnNoMemory;
+	}
+	printf("ios: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
+	*handler = uc;
+	return kIOReturnSuccess;
+}
+
+IOReturn
+DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
+    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
+{
+	if (df_ios_logs++ < 400) {
+		printf("ios sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
+		    a->scalarInputCount, a->structureInputSize, a->scalarOutputCount, a->structureOutputSize);
+	}
+	for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
+		a->scalarOutput[i] = 0;
+	}
+	if (a->structureOutput && a->structureOutputSize) {
+		bzero(a->structureOutput, a->structureOutputSize);
+	}
+	return kIOReturnSuccess;
+}
+
+IOReturn
+DFCoreSurfaceUC::clientClose(void)
+{
+	terminate();
+	return kIOReturnSuccess;
+}
+
 extern "C" void
 df_mfb_attach(IOService *provider)
 {
+	IOCoreSurfaceRoot *sr = OSTypeAlloc(IOCoreSurfaceRoot);
+	if (sr && sr->init() && sr->attach(provider) && sr->start(provider)) {
+		sr->registerService();
+		printf("ios: IOCoreSurfaceRoot registered\n");
+	} else {
+		printf("ios: IOCoreSurfaceRoot attach failed\n");
+	}
 	IOMobileFramebuffer *fb = OSTypeAlloc(IOMobileFramebuffer);
 	if (fb && fb->init() && fb->attach(provider) && fb->start(provider)) {
 		return;

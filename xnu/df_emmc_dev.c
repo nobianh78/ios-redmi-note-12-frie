@@ -538,7 +538,6 @@ df_watch_start(void)
 }
 
 /* fix-xcode16 P6: sample backboardd's user PC/LR on timer IRQs (ring of 64), dumped when ps exits. */
-extern const char *proc_best_name(proc_t);
 uint64_t df_bb_ring[64][2];
 unsigned df_bb_n;
 

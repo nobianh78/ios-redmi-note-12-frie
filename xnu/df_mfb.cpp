@@ -117,6 +117,8 @@ bool IOAcceleratorES::start(IOService *provider) {
   setProperty("IOClass", "IOAcceleratorES");
   setProperty("IOMatchCategory", "IOAcceleratorES");
   setProperty("IOGLESBundleName", "AppleMetalGLRenderer");
+  setProperty("MetalPluginName", "AGXMetalA11");
+  setProperty("MetalPluginClassName", "AGXMetalA11");
   setProperty("IOUserClientClass", "DFIOAcceleratorUC");
   registerService();
   printf("ios: IOAcceleratorES registered\n");
@@ -221,10 +223,10 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (a->structureOutput && a->structureOutputSize) {
     bzero(a->structureOutput, a->structureOutputSize);
   }
-  if (selector == 3 && a->scalarOutputCount >= 1) {
-    /* GetLayerDefaultSurface: return surface_id = 1 */
-    a->scalarOutput[0] = 1;
-    printf("mfb: GetLayerDefaultSurface -> id 1\n");
+  if (selector == 3) {
+    /* GetLayerDefaultSurface: return unsupported so CA keeps its working layer surface */
+    printf("mfb: GetLayerDefaultSurface -> unsupported\n");
+    return kIOReturnUnsupported;
   }
   if (selector == 4 && a->scalarOutputCount >= 1) {
     /* SwapBegin: return incremental swap token */
@@ -234,6 +236,12 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (selector == 8 && a->scalarOutputCount >= 2) { /* display size */
     a->scalarOutput[0] = DF_MFB_W;
     a->scalarOutput[1] = DF_MFB_H;
+  }
+  if (selector == 12 && a->scalarOutputCount >= 1) { /* power change */
+    a->scalarOutput[0] = 1;
+  }
+  if (selector == 15 && a->scalarOutputCount >= 1) {
+    a->scalarOutput[0] = 1;
   }
   if (selector == 18 && a->scalarOutputCount >= 1) { /* isMainDisplay */
     a->scalarOutput[0] = 1;
@@ -246,15 +254,20 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (selector == 28 && a->scalarOutputCount >= 1) { /* active flag */
     a->scalarOutput[0] = 1;
   }
+  if (selector == 29 && a->structureOutput && a->structureOutputSize >= 8) {
+    uint32_t *timing = (uint32_t *)a->structureOutput;
+    timing[0] = 60; /* 60 Hz */
+    timing[1] = 0;
+  }
+  if (selector == 57 && a->scalarOutputCount >= 1) { /* power state */
+    a->scalarOutput[0] = 1;
+  }
   if (selector == 5) {
     /* SwapEnd */
     static uint32_t s_swap_cnt = 0;
     if (!df_fbva) {
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
           DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
-    }
-    if (s_swap_cnt == 0) {
-      df_clear_fb();
     }
     s_swap_cnt++;
     if (a->structureInput && a->structureInputSize >= 0x60) {
@@ -268,8 +281,9 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
                        (size_t)DF_MFB_W * DF_MFB_H * 4);
       if (s_swap_cnt <= 10) {
-        printf("mfb: copyin fb 0x%llx -> %p err=%d\n", (uint64_t)g_user_fb_addr,
-               (void *)df_fbva, err);
+        printf("mfb: copyin fb 0x%llx -> %p err=%d [0]=0x%x [mid]=0x%x\n",
+               (uint64_t)g_user_fb_addr, (void *)df_fbva, err,
+               df_fbva[0], df_fbva[(DF_MFB_W * DF_MFB_H) / 2]);
       }
     }
     df_flush_fb();

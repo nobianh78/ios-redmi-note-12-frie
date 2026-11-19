@@ -11,10 +11,6 @@
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
-#ifdef copyin
-#undef copyin
-#endif
-extern "C" int copyin(const void *uaddr, void *kaddr, size_t len);
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size);
 struct _vm_map;
 typedef struct _vm_map *vm_map_t;
@@ -140,7 +136,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       }
     }
     if (g_user_fb_addr && df_fbva) {
-      int err = copyin((const void *)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
       if (s_swap_cnt <= 5) {
         printf("mfb: copyin fb 0x%llx -> %p err=%d\n", (uint64_t)g_user_fb_addr, (void *)df_fbva, err);
       }
@@ -153,7 +149,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     if (g_user_fb_addr && df_fbva) {
-      copyin((const void *)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     df_flush_fb();
   }

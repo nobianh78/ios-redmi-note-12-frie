@@ -146,7 +146,9 @@ public:
 class DFCoreSurfaceUC : public IOUserClient
 {
 	OSDeclareDefaultStructors(DFCoreSurfaceUC);
+	task_t fTask;
 public:
+	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
@@ -157,6 +159,14 @@ OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
 OSDefineMetaClassAndStructors(DFCoreSurfaceUC, IOUserClient);
 
 static unsigned df_ios_logs;
+
+bool
+DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+{
+	if (!IOUserClient::initWithTask(owningTask, securityID, type)) return false;
+	fTask = owningTask;
+	return true;
+}
 
 IOReturn
 IOCoreSurfaceRoot::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
@@ -210,9 +220,23 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 	}
 	if (selector == 0 && a->structureOutput && a->structureOutputSize >= 0xa68) {
 		uint8_t *out = (uint8_t *)a->structureOutput;
+		static uint8_t s_iosurface_page[16384] __attribute__((aligned(16384)));
+		mach_vm_address_t user_addr = 0;
+		IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)s_iosurface_page, sizeof(s_iosurface_page), kIODirectionInOut, kernel_task);
+		if (md) {
+			IOMemoryMap *map = md->createMappingInTask(fTask, 0, kIOMapAnywhere);
+			if (map) {
+				user_addr = map->getAddress();
+			}
+			md->release();
+		}
+		*(uint32_t *)(out + 0x04) = 1;          /* initial seed = 1 */
+		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr; /* mapped userspace shared page (offset 0x70 in IOSurfaceClient) */
 		*(uint32_t *)(out + 0x18) = 1;          /* surface_id = 1 */
 		*(uint32_t *)(out + 0x20) = DF_MFB_W;   /* width = 1080 */
 		*(uint32_t *)(out + 0x24) = DF_MFB_H;   /* height = 2400 */
+		*(uint32_t *)(out + 0x28) = DF_MFB_W * 4; /* bytes_per_row = 4320 */
+		*(uint32_t *)(out + 0x2c) = DF_MFB_W * DF_MFB_H * 4; /* alloc_size */
 		*(uint32_t *)(out + 0x30) = 0x42475241; /* 'BGRA' */
 		*(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
 		*(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset */
@@ -220,7 +244,18 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		if (a->scalarOutputCount >= 1) {
 			a->scalarOutput[0] = 1; /* surface_id */
 		}
-		printf("ios: s_create_surface -> id 1, %ux%u\n", DF_MFB_W, DF_MFB_H);
+		printf("ios: s_create_surface -> id 1, %ux%u, user_comm=0x%llx\n", DF_MFB_W, DF_MFB_H, (uint64_t)user_addr);
+	}
+	if (selector == 9) {
+		static uint32_t s_seed = 1;
+		s_seed = (s_seed + 2) | 3;
+		if (a->structureOutput && a->structureOutputSize >= 4) {
+			*(uint32_t *)a->structureOutput = s_seed;
+		}
+		printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
+	}
+	if (selector == 27) {
+		printf("ios: sel 27 (set_bulk_attachments)\n");
 	}
 	return kIOReturnSuccess;
 }

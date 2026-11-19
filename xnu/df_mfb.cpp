@@ -73,12 +73,14 @@ public:
 
 class IOAccelerator : public IOService {
   OSDeclareDefaultStructors(IOAccelerator);
+
 public:
   virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 };
 
 class IOAcceleratorES : public IOAccelerator {
   OSDeclareDefaultStructors(IOAcceleratorES);
+
 public:
   virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
   virtual IOReturn newUserClient(task_t owningTask, void *securityID,
@@ -88,6 +90,7 @@ public:
 
 class DFIOAcceleratorUC : public IOUserClient {
   OSDeclareDefaultStructors(DFIOAcceleratorUC);
+
 public:
   virtual IOReturn externalMethod(uint32_t selector,
                                   IOExternalMethodArguments *args,
@@ -121,8 +124,7 @@ bool IOAcceleratorES::start(IOService *provider) {
 }
 
 IOReturn IOAcceleratorES::newUserClient(task_t owningTask, void *securityID,
-                                        UInt32 type,
-                                        IOUserClient **handler) {
+                                        UInt32 type, IOUserClient **handler) {
   DFIOAcceleratorUC *uc = OSTypeAlloc(DFIOAcceleratorUC);
   if (!uc || !uc->initWithTask(owningTask, securityID, type) ||
       !uc->attach(this) || !uc->start(this)) {
@@ -138,9 +140,10 @@ IOReturn IOAcceleratorES::newUserClient(task_t owningTask, void *securityID,
   return kIOReturnSuccess;
 }
 
-IOReturn DFIOAcceleratorUC::externalMethod(
-    uint32_t selector, IOExternalMethodArguments *a,
-    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) {
+IOReturn DFIOAcceleratorUC::externalMethod(uint32_t selector,
+                                           IOExternalMethodArguments *a,
+                                           IOExternalMethodDispatch *dispatch,
+                                           OSObject *target, void *reference) {
   printf("acc sel %u pid %d\n", selector, proc_selfpid());
   for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
     a->scalarOutput[i] = 0;
@@ -174,6 +177,8 @@ bool IOMobileFramebuffer::start(IOService *provider) {
   setProperty("NormalModeEnable", kOSBooleanTrue);
   setProperty("dfr-supported", kOSBooleanFalse);
   setProperty("IOMFBSupportsPBuffer", kOSBooleanTrue);
+  setProperty("is-main-display", kOSBooleanTrue);
+  setProperty("display-type", "LCD");
   registerService();
   printf("mfb: IOMobileFramebuffer %dx%d at 0x%llx registered\n", DF_MFB_W,
          DF_MFB_H, DF_MFB_PHYS);
@@ -230,6 +235,14 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     a->scalarOutput[0] = DF_MFB_W;
     a->scalarOutput[1] = DF_MFB_H;
   }
+  if (selector == 18 && a->scalarOutputCount >= 1) { /* isMainDisplay */
+    a->scalarOutput[0] = 1;
+    printf("mfb: IsMainDisplay -> 1\n");
+  }
+  if (selector == 20 && a->scalarOutputCount >= 2) { /* canvas size */
+    a->scalarOutput[0] = DF_MFB_W;
+    a->scalarOutput[1] = DF_MFB_H;
+  }
   if (selector == 28 && a->scalarOutputCount >= 1) { /* active flag */
     a->scalarOutput[0] = 1;
   }
@@ -240,17 +253,21 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
           DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
-    if (s_swap_cnt++ < 5) {
-      if (a->structureInput && a->structureInputSize >= 0x60) {
-        uint8_t *p = (uint8_t *)a->structureInput;
-        uint32_t s0 = *(uint32_t *)(p + 0x54);
+    if (s_swap_cnt == 0) {
+      df_clear_fb();
+    }
+    s_swap_cnt++;
+    if (a->structureInput && a->structureInputSize >= 0x60) {
+      uint8_t *p = (uint8_t *)a->structureInput;
+      uint32_t s0 = *(uint32_t *)(p + 0x54);
+      if (s_swap_cnt <= 10) {
         printf("mfb: SwapEnd #%u layer0 surface_id=%u\n", s_swap_cnt, s0);
       }
     }
     if (g_user_fb_addr && df_fbva) {
       int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
                        (size_t)DF_MFB_W * DF_MFB_H * 4);
-      if (s_swap_cnt <= 5) {
+      if (s_swap_cnt <= 10) {
         printf("mfb: copyin fb 0x%llx -> %p err=%d\n", (uint64_t)g_user_fb_addr,
                (void *)df_fbva, err);
       }

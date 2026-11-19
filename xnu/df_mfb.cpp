@@ -12,7 +12,8 @@
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
 extern "C" int df_gui_active;
-extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size);
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr,
+                                            vm_size_t size);
 struct _vm_map;
 typedef struct _vm_map *vm_map_t;
 extern "C" vm_map_t get_task_map(task_t task);
@@ -34,6 +35,15 @@ static void df_flush_fb(void) {
     __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
   }
   __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void df_clear_fb(void) {
+  if (!df_fbva)
+    return;
+  for (size_t i = 0; i < (size_t)DF_MFB_W * DF_MFB_H; i++) {
+    df_fbva[i] = 0xff000000;
+  }
+  df_flush_fb();
 }
 
 class IOMobileFramebuffer : public IOService {
@@ -186,10 +196,7 @@ IOReturn IOMobileFramebuffer::newUserClient(task_t owningTask, void *securityID,
   printf("mfb: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
   if (!df_gui_active) {
     df_gui_active = 1;
-    if (df_fbva) {
-      bzero((void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
-      df_flush_fb();
-    }
+    df_clear_fb();
   }
   *handler = uc;
   return kIOReturnSuccess;
@@ -230,7 +237,8 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     /* SwapEnd */
     static uint32_t s_swap_cnt = 0;
     if (!df_fbva) {
-      df_fbva = (volatile uint32_t *)ml_io_map_unmappable(DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
+      df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
+          DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     if (s_swap_cnt++ < 5) {
       if (a->structureInput && a->structureInputSize >= 0x60) {
@@ -240,9 +248,11 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       }
     }
     if (g_user_fb_addr && df_fbva) {
-      int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
+                       (size_t)DF_MFB_W * DF_MFB_H * 4);
       if (s_swap_cnt <= 5) {
-        printf("mfb: copyin fb 0x%llx -> %p err=%d\n", (uint64_t)g_user_fb_addr, (void *)df_fbva, err);
+        printf("mfb: copyin fb 0x%llx -> %p err=%d\n", (uint64_t)g_user_fb_addr,
+               (void *)df_fbva, err);
       }
     }
     df_flush_fb();
@@ -250,10 +260,12 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (selector == 6) {
     /* SwapWait */
     if (!df_fbva) {
-      df_fbva = (volatile uint32_t *)ml_io_map_unmappable(DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
+      df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
+          DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     if (g_user_fb_addr && df_fbva) {
-      copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
+             (size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     df_flush_fb();
   }
@@ -291,8 +303,9 @@ class DFCoreSurfaceUC : public IOUserClient {
   OSDeclareDefaultStructors(DFCoreSurfaceUC);
   task_t fTask;
 
-	mach_vm_address_t fUserAddr;
-	mach_vm_address_t fUserFbAddr;
+  mach_vm_address_t fUserAddr;
+  mach_vm_address_t fUserFbAddr;
+
 public:
   virtual bool initWithTask(task_t owningTask, void *securityID,
                             UInt32 type) APPLE_KEXT_OVERRIDE;
@@ -313,14 +326,14 @@ OSDefineMetaClassAndStructors(DFCoreSurfaceUC, IOUserClient);
 static unsigned df_ios_logs;
 static uint8_t s_iosurface_comm[16384] __attribute__((aligned(16384)));
 
-bool
-DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID, UInt32 type)
-{
-	if (!IOUserClient::initWithTask(owningTask, securityID, type)) return false;
-	fTask = owningTask;
-	fUserAddr = 0;
-	fUserFbAddr = 0;
-	return true;
+bool DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID,
+                                   UInt32 type) {
+  if (!IOUserClient::initWithTask(owningTask, securityID, type))
+    return false;
+  fTask = owningTask;
+  fUserAddr = 0;
+  fUserFbAddr = 0;
+  return true;
 }
 
 IOReturn IOCoreSurfaceRoot::newUserClient(task_t owningTask, void *securityID,
@@ -340,120 +353,136 @@ IOReturn IOCoreSurfaceRoot::newUserClient(task_t owningTask, void *securityID,
   return kIOReturnSuccess;
 }
 
-IOReturn
-DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
-    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
-{
-	if (df_ios_logs++ < 400) {
-		printf("ios sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
-		    a->scalarInputCount, a->structureInputSize, a->scalarOutputCount, a->structureOutputSize);
-	}
-	for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
-		a->scalarOutput[i] = 0;
-	}
-	if (a->structureOutput && a->structureOutputSize) {
-		bzero(a->structureOutput, a->structureOutputSize);
-	}
-	if (selector == 13 && a->structureOutput && a->structureOutputSize >= 24) {
-		struct io_surface_limits {
-			uint32_t align;
-			uint32_t max_surface_count;
-			uint32_t max_bytes_per_row;
-			uint32_t max_width;
-			uint32_t max_height;
-			uint16_t reserved;
-			uint16_t version;
-		} *limits = (struct io_surface_limits *)a->structureOutput;
-		limits->align = 64;
-		limits->max_surface_count = 1024;
-		limits->max_bytes_per_row = 16384;
-		limits->max_width = 8192;
-		limits->max_height = 8192;
-		limits->reserved = 0;
-		limits->version = 1;
-		printf("ios: get_limits ok (ver=1)\n");
-	}
-	if ((selector == 0 || selector == 34 || a->structureOutputSize >= 0xa68) && a->structureOutput && a->structureOutputSize >= 0xa68) {
-		uint8_t *out = (uint8_t *)a->structureOutput;
-		task_t t = fTask ? fTask : current_task();
-		vm_map_t map = t ? get_task_map(t) : NULL;
+IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
+                                         IOExternalMethodArguments *a,
+                                         IOExternalMethodDispatch *dispatch,
+                                         OSObject *target, void *reference) {
+  if (df_ios_logs++ < 400) {
+    printf("ios sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
+           a->scalarInputCount, a->structureInputSize, a->scalarOutputCount,
+           a->structureOutputSize);
+  }
+  for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
+    a->scalarOutput[i] = 0;
+  }
+  if (a->structureOutput && a->structureOutputSize) {
+    bzero(a->structureOutput, a->structureOutputSize);
+  }
+  if (selector == 13 && a->structureOutput && a->structureOutputSize >= 24) {
+    struct io_surface_limits {
+      uint32_t align;
+      uint32_t max_surface_count;
+      uint32_t max_bytes_per_row;
+      uint32_t max_width;
+      uint32_t max_height;
+      uint16_t reserved;
+      uint16_t version;
+    } *limits = (struct io_surface_limits *)a->structureOutput;
+    limits->align = 64;
+    limits->max_surface_count = 1024;
+    limits->max_bytes_per_row = 16384;
+    limits->max_width = 8192;
+    limits->max_height = 8192;
+    limits->reserved = 0;
+    limits->version = 1;
+    printf("ios: get_limits ok (ver=1)\n");
+  }
+  if ((selector == 0 || selector == 34 || a->structureOutputSize >= 0xa68) &&
+      a->structureOutput && a->structureOutputSize >= 0xa68) {
+    uint8_t *out = (uint8_t *)a->structureOutput;
+    task_t t = fTask ? fTask : current_task();
+    vm_map_t map = t ? get_task_map(t) : NULL;
 
-		if (!fUserAddr) {
-			*(uint32_t *)(s_iosurface_comm + 0x0c) = 1; /* seed at offset 0xc */
-			*(uint32_t *)(s_iosurface_comm + 0x10) = 1;
-			IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)s_iosurface_comm, sizeof(s_iosurface_comm), kIODirectionInOut, kernel_task);
-			if (md) {
-				IOMemoryMap *m = md->createMappingInTask(t ? t : current_task(), 0, kIOMapAnywhere);
-				if (m) {
-					fUserAddr = m->getAddress();
-				}
-				md->release();
-			}
-			if (!fUserAddr && map) {
-				mach_vm_allocate(map, &fUserAddr, 16384, 1);
-			}
-		}
+    if (!fUserAddr) {
+      *(uint32_t *)(s_iosurface_comm + 0x0c) = 1; /* seed at offset 0xc */
+      *(uint32_t *)(s_iosurface_comm + 0x10) = 1;
+      IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(
+          (mach_vm_address_t)s_iosurface_comm, sizeof(s_iosurface_comm),
+          kIODirectionInOut, kernel_task);
+      if (md) {
+        IOMemoryMap *m =
+            md->createMappingInTask(t ? t : current_task(), 0, kIOMapAnywhere);
+        if (m) {
+          fUserAddr = m->getAddress();
+        }
+        md->release();
+      }
+      if (!fUserAddr && map) {
+        mach_vm_allocate(map, &fUserAddr, 16384, 1);
+      }
+    }
 
-		/* Map physical LCD framebuffer (1080x2400x4 = 10,368,000 bytes) into task address space */
-		if (!fUserFbAddr) {
-			if (t) {
-				IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
-				if (fb_md) {
-					IOMemoryMap *fb_map = fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
-					if (fb_map) {
-						fUserFbAddr = fb_map->getAddress();
-					}
-					fb_md->release();
-				}
-			}
-			if (!fUserFbAddr && map) {
-				mach_vm_allocate(map, &fUserFbAddr, (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
-			}
-		}
+    /* Map physical LCD framebuffer (1080x2400x4 = 10,368,000 bytes) into task
+     * address space */
+    if (!fUserFbAddr) {
+      if (t) {
+        IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(
+            DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4,
+            kIODirectionInOut);
+        if (fb_md) {
+          IOMemoryMap *fb_map =
+              fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
+          if (fb_map) {
+            fUserFbAddr = fb_map->getAddress();
+          }
+          fb_md->release();
+        }
+      }
+      if (!fUserFbAddr && map) {
+        mach_vm_allocate(map, &fUserFbAddr,
+                         (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
+      }
+    }
 
-		mach_vm_address_t user_addr = fUserAddr;
-		mach_vm_address_t user_fb_addr = fUserFbAddr;
-		g_user_fb_addr = user_fb_addr;
+    mach_vm_address_t user_addr = fUserAddr;
+    mach_vm_address_t user_fb_addr = fUserFbAddr;
+    g_user_fb_addr = user_fb_addr;
 
-		uint32_t target_sid = 1;
-		if (a->scalarInputCount >= 1 && a->scalarInput[0] != 0) {
-			target_sid = (uint32_t)a->scalarInput[0];
-		}
+    uint32_t target_sid = 1;
+    if (a->scalarInputCount >= 1 && a->scalarInput[0] != 0) {
+      target_sid = (uint32_t)a->scalarInput[0];
+    }
 
-		/* Fill IOSurface layout matching IOSurface.framework disassembly */
-		*(uint64_t *)(out + 0x00) = (uint64_t)user_fb_addr; /* BaseAddress (returned by _IOSurfaceClientGetBaseAddressOfPlane) */
-		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr;    /* mapped comm page (offset 0x70 in IOSurfaceClient) */
-		*(uint64_t *)(out + 0x10) = 0;                      /* detach/plane pointer */
-		*(uint32_t *)(out + 0x18) = target_sid;             /* surface_id */
-		*(uint32_t *)(out + 0x1c) = DF_MFB_W * DF_MFB_H * 4;/* alloc_size = 10,368,000 */
-		*(uint32_t *)(out + 0x20) = DF_MFB_W;               /* width = 1080 */
-		*(uint32_t *)(out + 0x24) = DF_MFB_H;               /* height = 2400 */
-		*(uint32_t *)(out + 0x28) = DF_MFB_W * 4;           /* bytes_per_row = 4320 */
-		*(uint32_t *)(out + 0x2c) = 0;                      /* plane 0 offset = 0 */
-		*(uint32_t *)(out + 0x30) = DF_MFB_W * DF_MFB_H * 4;/* plane 0 size = 10,368,000 */
-		*(uint32_t *)(out + 0x34) = 0x42475241;             /* pixel_format = 'BGRA' */
-		*(uint32_t *)(out + 0x38) = 1;                      /* plane_count = 1 */
-		*(uint32_t *)(out + 0xdc) = 0;                      /* plane 0 offset (alt) */
-		*(uint32_t *)(out + 0x124) = 0;                     /* plane 0 format flag */
-		if (a->scalarOutputCount >= 1) {
-			a->scalarOutput[0] = target_sid; /* surface_id */
-		}
-		printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector, target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
-	}
-	if (selector == 9) {
-		static uint32_t s_seed = 1;
-		s_seed = (s_seed + 2) | 3;
-		*(uint32_t *)(s_iosurface_comm + 0x0c) = s_seed;
-		*(uint32_t *)(s_iosurface_comm + 0x10) = s_seed;
-		if (a->structureOutput && a->structureOutputSize >= 4) {
-			*(uint32_t *)a->structureOutput = s_seed;
-		}
-		printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
-	}
-	if (selector == 27) {
-		printf("ios: sel 27 (set_bulk_attachments)\n");
-	}
-	return kIOReturnSuccess;
+    /* Fill IOSurface layout matching IOSurface.framework disassembly */
+    *(uint64_t *)(out + 0x00) =
+        (uint64_t)user_fb_addr; /* BaseAddress (returned by
+                                   _IOSurfaceClientGetBaseAddressOfPlane) */
+    *(uint64_t *)(out + 0x08) = (uint64_t)
+        user_addr; /* mapped comm page (offset 0x70 in IOSurfaceClient) */
+    *(uint64_t *)(out + 0x10) = 0;          /* detach/plane pointer */
+    *(uint32_t *)(out + 0x18) = target_sid; /* surface_id */
+    *(uint32_t *)(out + 0x1c) =
+        DF_MFB_W * DF_MFB_H * 4;              /* alloc_size = 10,368,000 */
+    *(uint32_t *)(out + 0x20) = DF_MFB_W;     /* width = 1080 */
+    *(uint32_t *)(out + 0x24) = DF_MFB_H;     /* height = 2400 */
+    *(uint32_t *)(out + 0x28) = DF_MFB_W * 4; /* bytes_per_row = 4320 */
+    *(uint32_t *)(out + 0x2c) = 0;            /* plane 0 offset = 0 */
+    *(uint32_t *)(out + 0x30) =
+        DF_MFB_W * DF_MFB_H * 4;            /* plane 0 size = 10,368,000 */
+    *(uint32_t *)(out + 0x34) = 0x42475241; /* pixel_format = 'BGRA' */
+    *(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
+    *(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset (alt) */
+    *(uint32_t *)(out + 0x124) = 0;         /* plane 0 format flag */
+    if (a->scalarOutputCount >= 1) {
+      a->scalarOutput[0] = target_sid; /* surface_id */
+    }
+    printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector,
+           target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
+  }
+  if (selector == 9) {
+    static uint32_t s_seed = 1;
+    s_seed = (s_seed + 2) | 3;
+    *(uint32_t *)(s_iosurface_comm + 0x0c) = s_seed;
+    *(uint32_t *)(s_iosurface_comm + 0x10) = s_seed;
+    if (a->structureOutput && a->structureOutputSize >= 4) {
+      *(uint32_t *)a->structureOutput = s_seed;
+    }
+    printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
+  }
+  if (selector == 27) {
+    printf("ios: sel 27 (set_bulk_attachments)\n");
+  }
+  return kIOReturnSuccess;
 }
 
 IOReturn DFCoreSurfaceUC::clientMemoryForType(UInt32 type,

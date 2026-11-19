@@ -11,6 +11,7 @@
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
+extern "C" volatile uint32_t *df_wdt;
 extern "C" int df_gui_active;
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr,
                                             vm_size_t size);
@@ -28,6 +29,9 @@ extern "C" kern_return_t mach_vm_allocate(vm_map_t target,
 static mach_vm_address_t g_user_fb_addr = 0;
 
 static void df_flush_fb(void) {
+  if (df_wdt) {
+    df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
+  }
   if (!df_fbva)
     return;
   for (uintptr_t a = (uintptr_t)df_fbva;
@@ -83,6 +87,7 @@ class IOAcceleratorES : public IOAccelerator {
 
 public:
   virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+  virtual OSObject *copyProperty(const char *aKey) const APPLE_KEXT_OVERRIDE;
   virtual IOReturn newUserClient(task_t owningTask, void *securityID,
                                  UInt32 type,
                                  IOUserClient **handler) APPLE_KEXT_OVERRIDE;
@@ -115,12 +120,24 @@ bool IOAcceleratorES::start(IOService *provider) {
     return false;
   }
   setProperty("IOClass", "IOAcceleratorES");
-  setProperty("IOMatchCategory", "IOAcceleratorES");
+  setProperty("IOMatchCategory", "IOAccelerator");
+  setProperty("IOGLBundleName", "AppleMetalGLRenderer");
   setProperty("IOGLESBundleName", "AppleMetalGLRenderer");
+  setProperty("IOGLESDefaultDiagnosticMode", (uint64_t)0, 32);
+  setProperty("IOGPUVendorId", (uint64_t)0x106b, 32);
+  setProperty("IOGPUDeviceId", (uint64_t)0x0001, 32);
   setProperty("IOUserClientClass", "DFIOAcceleratorUC");
   registerService();
   printf("ios: IOAcceleratorES registered\n");
   return true;
+}
+
+OSObject *IOAcceleratorES::copyProperty(const char *aKey) const {
+  static unsigned acc_prop_cnt = 0;
+  if (acc_prop_cnt++ < 40) {
+    printf("acc: copyProperty(%s)\n", aKey ? aKey : "null");
+  }
+  return IOService::copyProperty(aKey);
 }
 
 IOReturn IOAcceleratorES::newUserClient(task_t owningTask, void *securityID,
@@ -199,7 +216,10 @@ IOReturn IOMobileFramebuffer::newUserClient(task_t owningTask, void *securityID,
     return kIOReturnNoMemory;
   }
   printf("mfb: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
-  df_gui_active = 1;
+  if (!df_gui_active) {
+    df_gui_active = 1;
+    df_clear_fb();
+  }
   *handler = uc;
   return kIOReturnSuccess;
 }
@@ -257,6 +277,40 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   }
   if (selector == 57 && a->scalarOutputCount >= 1) { /* power state */
     a->scalarOutput[0] = 1;
+  }
+  if (selector == 22 || selector == 33) {
+    if (a->scalarOutputCount >= 1) {
+      a->scalarOutput[0] = 0;
+    }
+  }
+  if (selector == 74) {
+    /* Display Mode Information */
+    if (a->scalarOutputCount >= 1) {
+      a->scalarOutput[0] = 1;
+    }
+    if (a->structureOutput && a->structureOutputSize >= 24) {
+      uint32_t *m = (uint32_t *)a->structureOutput;
+      m[0] = DF_MFB_W;       /* 1080 */
+      m[1] = DF_MFB_H;       /* 2400 */
+      m[2] = 60;             /* 60 Hz */
+      m[3] = DF_MFB_W * 4;   /* 4320 bytes per row */
+      m[4] = 32;             /* 32 bpp */
+      m[5] = 0x42475241;     /* 'BGRA' */
+    }
+    printf("mfb: sel 74 (display mode) -> 1080x2400@60\n");
+  }
+  if (selector == 79) {
+    if (a->scalarOutputCount >= 1) {
+      a->scalarOutput[0] = 1;
+    }
+    if (a->structureOutput && a->structureOutputSize >= 16) {
+      uint32_t *m = (uint32_t *)a->structureOutput;
+      m[0] = DF_MFB_W;
+      m[1] = DF_MFB_H;
+      m[2] = 60;
+      m[3] = 0;
+    }
+    printf("mfb: sel 79 -> ok\n");
   }
   if (selector == 5) {
     /* SwapEnd */

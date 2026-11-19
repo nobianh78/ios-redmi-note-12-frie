@@ -117,8 +117,6 @@ bool IOAcceleratorES::start(IOService *provider) {
   setProperty("IOClass", "IOAcceleratorES");
   setProperty("IOMatchCategory", "IOAcceleratorES");
   setProperty("IOGLESBundleName", "AppleMetalGLRenderer");
-  setProperty("MetalPluginName", "AGXMetalA11");
-  setProperty("MetalPluginClassName", "AGXMetalA11");
   setProperty("IOUserClientClass", "DFIOAcceleratorUC");
   registerService();
   printf("ios: IOAcceleratorES registered\n");
@@ -201,10 +199,7 @@ IOReturn IOMobileFramebuffer::newUserClient(task_t owningTask, void *securityID,
     return kIOReturnNoMemory;
   }
   printf("mfb: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
-  if (!df_gui_active) {
-    df_gui_active = 1;
-    df_clear_fb();
-  }
+  df_gui_active = 1;
   *handler = uc;
   return kIOReturnSuccess;
 }
@@ -223,10 +218,11 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (a->structureOutput && a->structureOutputSize) {
     bzero(a->structureOutput, a->structureOutputSize);
   }
-  if (selector == 3) {
-    /* GetLayerDefaultSurface: return unsupported so CA keeps its working layer surface */
-    printf("mfb: GetLayerDefaultSurface -> unsupported\n");
-    return kIOReturnUnsupported;
+  if (selector == 3 && a->scalarOutputCount >= 1) {
+    /* GetLayerDefaultSurface: return surface_id = 1 */
+    a->scalarOutput[0] = 1;
+    printf("mfb: GetLayerDefaultSurface -> id 1\n");
+    return kIOReturnSuccess;
   }
   if (selector == 4 && a->scalarOutputCount >= 1) {
     /* SwapBegin: return incremental swap token */
@@ -273,31 +269,17 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     if (a->structureInput && a->structureInputSize >= 0x60) {
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
-      if (s_swap_cnt <= 10) {
-        printf("mfb: SwapEnd #%u layer0 surface_id=%u\n", s_swap_cnt, s0);
-      }
-    }
-    if (g_user_fb_addr && df_fbva) {
-      int err = copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
-                       (size_t)DF_MFB_W * DF_MFB_H * 4);
-      if (s_swap_cnt <= 10) {
-        printf("mfb: copyin fb 0x%llx -> %p err=%d [0]=0x%x [mid]=0x%x\n",
-               (uint64_t)g_user_fb_addr, (void *)df_fbva, err,
-               df_fbva[0], df_fbva[(DF_MFB_W * DF_MFB_H) / 2]);
+      if (s_swap_cnt <= 20) {
+        printf("mfb: SwapEnd #%u layer0 surface_id=%u [0]=0x%x [mid]=0x%x\n",
+               s_swap_cnt, s0,
+               df_fbva ? df_fbva[0] : 0,
+               df_fbva ? df_fbva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
     df_flush_fb();
   }
   if (selector == 6) {
     /* SwapWait */
-    if (!df_fbva) {
-      df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
-          DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
-    }
-    if (g_user_fb_addr && df_fbva) {
-      copyin((user_addr_t)g_user_fb_addr, (void *)df_fbva,
-             (size_t)DF_MFB_W * DF_MFB_H * 4);
-    }
     df_flush_fb();
   }
   return kIOReturnSuccess;

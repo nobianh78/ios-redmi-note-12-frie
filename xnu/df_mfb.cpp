@@ -9,10 +9,19 @@
 #include <IOKit/IOMemoryDescriptor.h>
 
 extern "C" int proc_selfpid(void);
+extern "C" volatile uint32_t *df_fbva;
 
 #define DF_MFB_PHYS  0x7ce6a000ULL
 #define DF_MFB_W      1080
 #define DF_MFB_H      2400
+
+static void df_flush_fb(void) {
+	if (!df_fbva) return;
+	for (uintptr_t a = (uintptr_t)df_fbva; a < (uintptr_t)df_fbva + (uintptr_t)DF_MFB_W * DF_MFB_H * 4; a += 64) {
+		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
 
 class IOMobileFramebuffer : public IOService
 {
@@ -95,6 +104,18 @@ DFMobileFramebufferUC::externalMethod(uint32_t selector, IOExternalMethodArgumen
 	if (selector == 28 && a->scalarOutputCount >= 1) {  /* active flag (guess) */
 		a->scalarOutput[0] = 1;
 	}
+	if (selector == 5) {
+		if (a->structureInput && a->structureInputSize >= 0x60) {
+			uint8_t *p = (uint8_t *)a->structureInput;
+			uint32_t s0 = *(uint32_t *)(p + 0x54);
+			printf("mfb: SwapPresent layer0 surface_id=%u\n", s0);
+		}
+		df_flush_fb();
+	}
+	if (selector == 6) {
+		/* SwapCommit */
+		df_flush_fb();
+	}
 	return kIOReturnSuccess;
 }
 
@@ -128,6 +149,7 @@ class DFCoreSurfaceUC : public IOUserClient
 public:
 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 };
 
@@ -167,7 +189,48 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 	if (a->structureOutput && a->structureOutputSize) {
 		bzero(a->structureOutput, a->structureOutputSize);
 	}
+	if (selector == 13 && a->structureOutput && a->structureOutputSize >= 24) {
+		struct io_surface_limits {
+			uint32_t align;
+			uint32_t max_surface_count;
+			uint32_t max_bytes_per_row;
+			uint32_t max_width;
+			uint32_t max_height;
+			uint16_t reserved;
+			uint16_t version;
+		} *limits = (struct io_surface_limits *)a->structureOutput;
+		limits->align = 64;
+		limits->max_surface_count = 1024;
+		limits->max_bytes_per_row = 16384;
+		limits->max_width = 8192;
+		limits->max_height = 8192;
+		limits->reserved = 0;
+		limits->version = 1;
+		printf("ios: get_limits ok (ver=1)\n");
+	}
+	if (selector == 0 && a->structureOutput && a->structureOutputSize >= 0xa68) {
+		uint8_t *out = (uint8_t *)a->structureOutput;
+		*(uint32_t *)(out + 0x18) = 1;          /* surface_id = 1 */
+		*(uint32_t *)(out + 0x20) = DF_MFB_W;   /* width = 1080 */
+		*(uint32_t *)(out + 0x24) = DF_MFB_H;   /* height = 2400 */
+		*(uint32_t *)(out + 0x30) = 0x42475241; /* 'BGRA' */
+		*(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
+		*(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset */
+		*(uint32_t *)(out + 0x124) = 0;         /* plane 0 format flag */
+		if (a->scalarOutputCount >= 1) {
+			a->scalarOutput[0] = 1; /* surface_id */
+		}
+		printf("ios: s_create_surface -> id 1, %ux%u\n", DF_MFB_W, DF_MFB_H);
+	}
 	return kIOReturnSuccess;
+}
+
+IOReturn
+DFCoreSurfaceUC::clientMemoryForType(UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
+{
+	printf("ios: clientMemoryForType %u\n", (unsigned)type);
+	*memory = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
+	return *memory ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 
 IOReturn

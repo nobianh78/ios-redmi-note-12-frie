@@ -24,6 +24,14 @@ def main():
     files, path = catalog(im)
     by_path = {path(p, n): rec for _, p, n, rec in files}
     for p in paths:
+        if p.startswith('block:'):
+            part = p[6:]
+            if '-' in part:
+                bs, be = map(int, part.split('-'))
+                want.update(range(bs, be + 1))
+            else:
+                want.add(int(part))
+            continue
         rec = by_path[p]
         for i in range(8):
             s, c = struct.unpack('>II', rec[104 + 8 * i:112 + 8 * i])

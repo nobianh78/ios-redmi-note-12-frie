@@ -151,6 +151,8 @@ class DFCoreSurfaceUC : public IOUserClient
 {
 	OSDeclareDefaultStructors(DFCoreSurfaceUC);
 	task_t fTask;
+	mach_vm_address_t fUserAddr;
+	mach_vm_address_t fUserFbAddr;
 public:
 	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -169,6 +171,8 @@ DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
 	if (!IOUserClient::initWithTask(owningTask, securityID, type)) return false;
 	fTask = owningTask;
+	fUserAddr = 0;
+	fUserFbAddr = 0;
 	return true;
 }
 
@@ -222,40 +226,50 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		limits->version = 1;
 		printf("ios: get_limits ok (ver=1)\n");
 	}
-	if (selector == 0 && a->structureOutput && a->structureOutputSize >= 0xa68) {
+	if ((selector == 0 || selector == 34 || a->structureOutputSize >= 0xa68) && a->structureOutput && a->structureOutputSize >= 0xa68) {
 		uint8_t *out = (uint8_t *)a->structureOutput;
 		task_t t = fTask ? fTask : current_task();
-		mach_vm_address_t user_addr = 0;
-		mach_vm_address_t user_fb_addr = 0;
 		vm_map_t map = t ? get_task_map(t) : NULL;
 
-		if (map) {
-			mach_vm_allocate(map, &user_addr, 16384, 1);
-		}
-		if (!user_addr && t) {
-			IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, 16384, kIODirectionInOut);
-			if (md) {
-				IOMemoryMap *m = md->createMappingInTask(t, 0, kIOMapAnywhere);
-				if (m) {
-					user_addr = m->getAddress();
+		if (!fUserAddr) {
+			if (map) {
+				mach_vm_allocate(map, &fUserAddr, 16384, 1);
+			}
+			if (!fUserAddr && t) {
+				IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, 16384, kIODirectionInOut);
+				if (md) {
+					IOMemoryMap *m = md->createMappingInTask(t, 0, kIOMapAnywhere);
+					if (m) {
+						fUserAddr = m->getAddress();
+					}
+					md->release();
 				}
-				md->release();
 			}
 		}
 
 		/* Map physical LCD framebuffer (1080x2400x4 = 10,368,000 bytes) into task address space */
-		if (t) {
-			IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
-			if (fb_md) {
-				IOMemoryMap *fb_map = fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
-				if (fb_map) {
-					user_fb_addr = fb_map->getAddress();
+		if (!fUserFbAddr) {
+			if (t) {
+				IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
+				if (fb_md) {
+					IOMemoryMap *fb_map = fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
+					if (fb_map) {
+						fUserFbAddr = fb_map->getAddress();
+					}
+					fb_md->release();
 				}
-				fb_md->release();
+			}
+			if (!fUserFbAddr && map) {
+				mach_vm_allocate(map, &fUserFbAddr, (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
 			}
 		}
-		if (!user_fb_addr && map) {
-			mach_vm_allocate(map, &user_fb_addr, (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
+
+		mach_vm_address_t user_addr = fUserAddr;
+		mach_vm_address_t user_fb_addr = fUserFbAddr;
+
+		uint32_t target_sid = 1;
+		if (a->scalarInputCount >= 1 && a->scalarInput[0] != 0) {
+			target_sid = (uint32_t)a->scalarInput[0];
 		}
 
 		/* Fill IOSurface layout matching IOSurface.framework disassembly */
@@ -263,7 +277,7 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		*(uint32_t *)(out + 0x04) = 1;                      /* initial seed = 1 */
 		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr;    /* mapped comm page (offset 0x70 in IOSurfaceClient) */
 		*(uint64_t *)(out + 0x10) = 0;                      /* detach/plane pointer */
-		*(uint32_t *)(out + 0x18) = 1;                      /* surface_id = 1 */
+		*(uint32_t *)(out + 0x18) = target_sid;             /* surface_id */
 		*(uint32_t *)(out + 0x1c) = DF_MFB_W * DF_MFB_H * 4;/* alloc_size = 10,368,000 */
 		*(uint32_t *)(out + 0x20) = DF_MFB_W;               /* width = 1080 */
 		*(uint32_t *)(out + 0x24) = DF_MFB_H;               /* height = 2400 */
@@ -275,9 +289,9 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		*(uint32_t *)(out + 0xdc) = 0;                      /* plane 0 offset (alt) */
 		*(uint32_t *)(out + 0x124) = 0;                     /* plane 0 format flag */
 		if (a->scalarOutputCount >= 1) {
-			a->scalarOutput[0] = 1; /* surface_id */
+			a->scalarOutput[0] = target_sid; /* surface_id */
 		}
-		printf("ios: s_create_surface -> id 1, fb=0x%llx, comm=0x%llx\n", (uint64_t)user_fb_addr, (uint64_t)user_addr);
+		printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector, target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
 	}
 	if (selector == 9) {
 		static uint32_t s_seed = 1;

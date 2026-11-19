@@ -10,6 +10,10 @@
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
+struct _vm_map;
+typedef struct _vm_map *vm_map_t;
+extern "C" vm_map_t get_task_map(task_t task);
+extern "C" kern_return_t mach_vm_allocate(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, int flags);
 
 #define DF_MFB_PHYS  0x7ce6a000ULL
 #define DF_MFB_W      1080
@@ -220,15 +224,23 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 	}
 	if (selector == 0 && a->structureOutput && a->structureOutputSize >= 0xa68) {
 		uint8_t *out = (uint8_t *)a->structureOutput;
-		static uint8_t s_iosurface_page[16384] __attribute__((aligned(16384)));
+		task_t t = fTask ? fTask : current_task();
 		mach_vm_address_t user_addr = 0;
-		IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)s_iosurface_page, sizeof(s_iosurface_page), kIODirectionInOut, kernel_task);
-		if (md) {
-			IOMemoryMap *map = md->createMappingInTask(fTask, 0, kIOMapAnywhere);
+		if (t) {
+			vm_map_t map = get_task_map(t);
 			if (map) {
-				user_addr = map->getAddress();
+				mach_vm_allocate(map, &user_addr, 16384, 1);
 			}
-			md->release();
+		}
+		if (!user_addr && t) {
+			IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, 16384, kIODirectionInOut);
+			if (md) {
+				IOMemoryMap *map = md->createMappingInTask(t, 0, kIOMapAnywhere);
+				if (map) {
+					user_addr = map->getAddress();
+				}
+				md->release();
+			}
 		}
 		*(uint32_t *)(out + 0x04) = 1;          /* initial seed = 1 */
 		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr; /* mapped userspace shared page (offset 0x70 in IOSurfaceClient) */

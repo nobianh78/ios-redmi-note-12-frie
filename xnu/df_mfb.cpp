@@ -116,14 +116,25 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   if (a->structureOutput && a->structureOutputSize) {
     bzero(a->structureOutput, a->structureOutputSize);
   }
-  if (selector == 8 && a->scalarOutputCount >= 2) { /* display size (guess) */
+  if (selector == 3 && a->scalarOutputCount >= 1) {
+    /* GetLayerDefaultSurface: return surface_id = 1 */
+    a->scalarOutput[0] = 1;
+    printf("mfb: GetLayerDefaultSurface -> id 1\n");
+  }
+  if (selector == 4 && a->scalarOutputCount >= 1) {
+    /* SwapBegin: return incremental swap token */
+    static uint32_t s_swap_token = 1;
+    a->scalarOutput[0] = ++s_swap_token;
+  }
+  if (selector == 8 && a->scalarOutputCount >= 2) { /* display size */
     a->scalarOutput[0] = DF_MFB_W;
     a->scalarOutput[1] = DF_MFB_H;
   }
-  if (selector == 28 && a->scalarOutputCount >= 1) { /* active flag (guess) */
+  if (selector == 28 && a->scalarOutputCount >= 1) { /* active flag */
     a->scalarOutput[0] = 1;
   }
   if (selector == 5) {
+    /* SwapEnd */
     static uint32_t s_swap_cnt = 0;
     if (!df_fbva) {
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
@@ -132,7 +143,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       if (a->structureInput && a->structureInputSize >= 0x60) {
         uint8_t *p = (uint8_t *)a->structureInput;
         uint32_t s0 = *(uint32_t *)(p + 0x54);
-        printf("mfb: SwapPresent #%u layer0 surface_id=%u\n", s_swap_cnt, s0);
+        printf("mfb: SwapEnd #%u layer0 surface_id=%u\n", s_swap_cnt, s0);
       }
     }
     if (g_user_fb_addr && df_fbva) {
@@ -144,7 +155,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     df_flush_fb();
   }
   if (selector == 6) {
-    /* SwapCommit */
+    /* SwapWait */
     if (!df_fbva) {
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
@@ -207,6 +218,7 @@ OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
 OSDefineMetaClassAndStructors(DFCoreSurfaceUC, IOUserClient);
 
 static unsigned df_ios_logs;
+static uint8_t s_iosurface_comm[16384] __attribute__((aligned(16384)));
 
 bool
 DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID, UInt32 type)
@@ -274,18 +286,18 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		vm_map_t map = t ? get_task_map(t) : NULL;
 
 		if (!fUserAddr) {
-			if (map) {
-				mach_vm_allocate(map, &fUserAddr, 16384, 1);
-			}
-			if (!fUserAddr && t) {
-				IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, 16384, kIODirectionInOut);
-				if (md) {
-					IOMemoryMap *m = md->createMappingInTask(t, 0, kIOMapAnywhere);
-					if (m) {
-						fUserAddr = m->getAddress();
-					}
-					md->release();
+			*(uint32_t *)(s_iosurface_comm + 0x0c) = 1; /* seed at offset 0xc */
+			*(uint32_t *)(s_iosurface_comm + 0x10) = 1;
+			IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)s_iosurface_comm, sizeof(s_iosurface_comm), kIODirectionInOut, kernel_task);
+			if (md) {
+				IOMemoryMap *m = md->createMappingInTask(t ? t : current_task(), 0, kIOMapAnywhere);
+				if (m) {
+					fUserAddr = m->getAddress();
 				}
+				md->release();
+			}
+			if (!fUserAddr && map) {
+				mach_vm_allocate(map, &fUserAddr, 16384, 1);
 			}
 		}
 
@@ -317,7 +329,6 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 
 		/* Fill IOSurface layout matching IOSurface.framework disassembly */
 		*(uint64_t *)(out + 0x00) = (uint64_t)user_fb_addr; /* BaseAddress (returned by _IOSurfaceClientGetBaseAddressOfPlane) */
-		*(uint32_t *)(out + 0x04) = 1;                      /* initial seed = 1 */
 		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr;    /* mapped comm page (offset 0x70 in IOSurfaceClient) */
 		*(uint64_t *)(out + 0x10) = 0;                      /* detach/plane pointer */
 		*(uint32_t *)(out + 0x18) = target_sid;             /* surface_id */
@@ -339,6 +350,8 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 	if (selector == 9) {
 		static uint32_t s_seed = 1;
 		s_seed = (s_seed + 2) | 3;
+		*(uint32_t *)(s_iosurface_comm + 0x0c) = s_seed;
+		*(uint32_t *)(s_iosurface_comm + 0x10) = s_seed;
 		if (a->structureOutput && a->structureOutputSize >= 4) {
 			*(uint32_t *)a->structureOutput = s_seed;
 		}

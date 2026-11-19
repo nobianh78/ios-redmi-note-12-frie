@@ -558,19 +558,6 @@ df_bb_sample(uint64_t pc, uint64_t lr)
 void
 df_bb_dump(int pid)
 {
-	static int last;
-	if (pid == last) {
-		return;
-	}
-	last = pid;
-	unsigned n = df_bb_n;
-	printf("BBPC samples %u\n", n);
-	if (df_bb_task) {
-		extern void df_task_threads_dump(void *);
-		df_task_threads_dump(df_bb_task);
-	}
-	for (unsigned i = 0; i < 64 && i < n; i++) {
-		unsigned k = (n - 1 - i) & 63;
-		printf("BBPC pc 0x%llx lr 0x%llx\n", df_bb_ring[k][0], df_bb_ring[k][1]);
-	}
+	/* silenced to keep video console clean for UI */
+	(void)pid;
 }

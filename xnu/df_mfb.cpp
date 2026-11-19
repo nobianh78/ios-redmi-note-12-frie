@@ -226,37 +226,58 @@ DFCoreSurfaceUC::externalMethod(uint32_t selector, IOExternalMethodArguments *a,
 		uint8_t *out = (uint8_t *)a->structureOutput;
 		task_t t = fTask ? fTask : current_task();
 		mach_vm_address_t user_addr = 0;
-		if (t) {
-			vm_map_t map = get_task_map(t);
-			if (map) {
-				mach_vm_allocate(map, &user_addr, 16384, 1);
-			}
+		mach_vm_address_t user_fb_addr = 0;
+		vm_map_t map = t ? get_task_map(t) : NULL;
+
+		if (map) {
+			mach_vm_allocate(map, &user_addr, 16384, 1);
 		}
 		if (!user_addr && t) {
 			IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, 16384, kIODirectionInOut);
 			if (md) {
-				IOMemoryMap *map = md->createMappingInTask(t, 0, kIOMapAnywhere);
-				if (map) {
-					user_addr = map->getAddress();
+				IOMemoryMap *m = md->createMappingInTask(t, 0, kIOMapAnywhere);
+				if (m) {
+					user_addr = m->getAddress();
 				}
 				md->release();
 			}
 		}
-		*(uint32_t *)(out + 0x04) = 1;          /* initial seed = 1 */
-		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr; /* mapped userspace shared page (offset 0x70 in IOSurfaceClient) */
-		*(uint32_t *)(out + 0x18) = 1;          /* surface_id = 1 */
-		*(uint32_t *)(out + 0x20) = DF_MFB_W;   /* width = 1080 */
-		*(uint32_t *)(out + 0x24) = DF_MFB_H;   /* height = 2400 */
-		*(uint32_t *)(out + 0x28) = DF_MFB_W * 4; /* bytes_per_row = 4320 */
-		*(uint32_t *)(out + 0x2c) = DF_MFB_W * DF_MFB_H * 4; /* alloc_size */
-		*(uint32_t *)(out + 0x30) = 0x42475241; /* 'BGRA' */
-		*(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
-		*(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset */
-		*(uint32_t *)(out + 0x124) = 0;         /* plane 0 format flag */
+
+		/* Map physical LCD framebuffer (1080x2400x4 = 10,368,000 bytes) into task address space */
+		if (t) {
+			IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
+			if (fb_md) {
+				IOMemoryMap *fb_map = fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
+				if (fb_map) {
+					user_fb_addr = fb_map->getAddress();
+				}
+				fb_md->release();
+			}
+		}
+		if (!user_fb_addr && map) {
+			mach_vm_allocate(map, &user_fb_addr, (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
+		}
+
+		/* Fill IOSurface layout matching IOSurface.framework disassembly */
+		*(uint64_t *)(out + 0x00) = (uint64_t)user_fb_addr; /* BaseAddress (returned by _IOSurfaceClientGetBaseAddressOfPlane) */
+		*(uint32_t *)(out + 0x04) = 1;                      /* initial seed = 1 */
+		*(uint64_t *)(out + 0x08) = (uint64_t)user_addr;    /* mapped comm page (offset 0x70 in IOSurfaceClient) */
+		*(uint64_t *)(out + 0x10) = 0;                      /* detach/plane pointer */
+		*(uint32_t *)(out + 0x18) = 1;                      /* surface_id = 1 */
+		*(uint32_t *)(out + 0x1c) = DF_MFB_W * DF_MFB_H * 4;/* alloc_size = 10,368,000 */
+		*(uint32_t *)(out + 0x20) = DF_MFB_W;               /* width = 1080 */
+		*(uint32_t *)(out + 0x24) = DF_MFB_H;               /* height = 2400 */
+		*(uint32_t *)(out + 0x28) = DF_MFB_W * 4;           /* bytes_per_row = 4320 */
+		*(uint32_t *)(out + 0x2c) = 0;                      /* plane 0 offset = 0 */
+		*(uint32_t *)(out + 0x30) = DF_MFB_W * DF_MFB_H * 4;/* plane 0 size = 10,368,000 */
+		*(uint32_t *)(out + 0x34) = 0x42475241;             /* pixel_format = 'BGRA' */
+		*(uint32_t *)(out + 0x38) = 1;                      /* plane_count = 1 */
+		*(uint32_t *)(out + 0xdc) = 0;                      /* plane 0 offset (alt) */
+		*(uint32_t *)(out + 0x124) = 0;                     /* plane 0 format flag */
 		if (a->scalarOutputCount >= 1) {
 			a->scalarOutput[0] = 1; /* surface_id */
 		}
-		printf("ios: s_create_surface -> id 1, %ux%u, user_comm=0x%llx\n", DF_MFB_W, DF_MFB_H, (uint64_t)user_addr);
+		printf("ios: s_create_surface -> id 1, fb=0x%llx, comm=0x%llx\n", (uint64_t)user_fb_addr, (uint64_t)user_addr);
 	}
 	if (selector == 9) {
 		static uint32_t s_seed = 1;

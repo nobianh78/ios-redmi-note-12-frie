@@ -11,6 +11,7 @@
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
+extern "C" int df_gui_active;
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size);
 struct _vm_map;
 typedef struct _vm_map *vm_map_t;
@@ -60,8 +61,90 @@ public:
   virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 };
 
+class IOAccelerator : public IOService {
+  OSDeclareDefaultStructors(IOAccelerator);
+public:
+  virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+};
+
+class IOAcceleratorES : public IOAccelerator {
+  OSDeclareDefaultStructors(IOAcceleratorES);
+public:
+  virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+  virtual IOReturn newUserClient(task_t owningTask, void *securityID,
+                                 UInt32 type,
+                                 IOUserClient **handler) APPLE_KEXT_OVERRIDE;
+};
+
+class DFIOAcceleratorUC : public IOUserClient {
+  OSDeclareDefaultStructors(DFIOAcceleratorUC);
+public:
+  virtual IOReturn externalMethod(uint32_t selector,
+                                  IOExternalMethodArguments *args,
+                                  IOExternalMethodDispatch *dispatch,
+                                  OSObject *target,
+                                  void *reference) APPLE_KEXT_OVERRIDE;
+  virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+};
+
 OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
 OSDefineMetaClassAndStructors(DFMobileFramebufferUC, IOUserClient);
+OSDefineMetaClassAndStructors(IOAccelerator, IOService);
+OSDefineMetaClassAndStructors(IOAcceleratorES, IOAccelerator);
+OSDefineMetaClassAndStructors(DFIOAcceleratorUC, IOUserClient);
+
+bool IOAccelerator::start(IOService *provider) {
+  return IOService::start(provider);
+}
+
+bool IOAcceleratorES::start(IOService *provider) {
+  if (!IOAccelerator::start(provider)) {
+    return false;
+  }
+  setProperty("IOClass", "IOAcceleratorES");
+  setProperty("IOMatchCategory", "IOAcceleratorES");
+  setProperty("IOGLESBundleName", "AppleMetalGLRenderer");
+  setProperty("IOUserClientClass", "DFIOAcceleratorUC");
+  registerService();
+  printf("ios: IOAcceleratorES registered\n");
+  return true;
+}
+
+IOReturn IOAcceleratorES::newUserClient(task_t owningTask, void *securityID,
+                                        UInt32 type,
+                                        IOUserClient **handler) {
+  DFIOAcceleratorUC *uc = OSTypeAlloc(DFIOAcceleratorUC);
+  if (!uc || !uc->initWithTask(owningTask, securityID, type) ||
+      !uc->attach(this) || !uc->start(this)) {
+    if (uc) {
+      uc->detach(this);
+      uc->release();
+    }
+    printf("acc: newUserClient failed\n");
+    return kIOReturnNoMemory;
+  }
+  printf("acc: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
+  *handler = uc;
+  return kIOReturnSuccess;
+}
+
+IOReturn DFIOAcceleratorUC::externalMethod(
+    uint32_t selector, IOExternalMethodArguments *a,
+    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) {
+  printf("acc sel %u pid %d\n", selector, proc_selfpid());
+  for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
+    a->scalarOutput[i] = 0;
+  }
+  if (a->structureOutput && a->structureOutputSize) {
+    bzero(a->structureOutput, a->structureOutputSize);
+  }
+  return kIOReturnSuccess;
+}
+
+IOReturn DFIOAcceleratorUC::clientClose(void) {
+  terminate();
+  return kIOReturnSuccess;
+}
 
 static unsigned df_mfb_logs;
 
@@ -78,6 +161,9 @@ bool IOMobileFramebuffer::start(IOService *provider) {
   setProperty("primary-display", kOSBooleanTrue);
   setProperty("display-id", (uint64_t)0, 32);
   setProperty("backlight-control", kOSBooleanTrue);
+  setProperty("NormalModeEnable", kOSBooleanTrue);
+  setProperty("dfr-supported", kOSBooleanFalse);
+  setProperty("IOMFBSupportsPBuffer", kOSBooleanTrue);
   registerService();
   printf("mfb: IOMobileFramebuffer %dx%d at 0x%llx registered\n", DF_MFB_W,
          DF_MFB_H, DF_MFB_PHYS);
@@ -98,6 +184,13 @@ IOReturn IOMobileFramebuffer::newUserClient(task_t owningTask, void *securityID,
     return kIOReturnNoMemory;
   }
   printf("mfb: open type %u by pid %d\n", (unsigned)type, proc_selfpid());
+  if (!df_gui_active) {
+    df_gui_active = 1;
+    if (df_fbva) {
+      bzero((void *)df_fbva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      df_flush_fb();
+    }
+  }
   *handler = uc;
   return kIOReturnSuccess;
 }
@@ -443,10 +536,20 @@ extern "C" void df_mfb_attach(IOService *provider) {
   }
   IOMobileFramebuffer *fb = OSTypeAlloc(IOMobileFramebuffer);
   if (fb && fb->init() && fb->attach(provider) && fb->start(provider)) {
-    return;
+    printf("mfb: IOMobileFramebuffer registered\n");
+  } else {
+    printf("mfb: attach failed\n");
+    if (fb) {
+      fb->release();
+    }
   }
-  printf("mfb: attach failed\n");
-  if (fb) {
-    fb->release();
+  IOAcceleratorES *acc = OSTypeAlloc(IOAcceleratorES);
+  if (acc && acc->init() && acc->attach(provider) && acc->start(provider)) {
+    printf("ios: IOAcceleratorES registered\n");
+  } else {
+    printf("ios: IOAcceleratorES attach failed\n");
+    if (acc) {
+      acc->release();
+    }
   }
 }

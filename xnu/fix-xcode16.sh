@@ -516,6 +516,7 @@ df_usb_line(char c)
 	}
 }
 void df_cons_write(const char *s, int n);
+int df_gui_active = 0;
 static uint64_t df_cons_last;
 void
 df_cons_write(const char *s, int n)
@@ -531,6 +532,9 @@ df_cons_write(const char *s, int n)
 		char c = s[i];
 		df_ps_put(c);
 		df_usb_line(c);   /* COM6 gets the shell, not the kernel debug lines (LCD keeps everything) */
+		if (df_gui_active) {
+			continue;
+		}
 		if (c == '\n' || df_con_col == cols) {
 			df_ln_recolor(fb);
 			df_con_col = 0;

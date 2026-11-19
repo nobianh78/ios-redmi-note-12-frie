@@ -11,6 +11,9 @@
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
+#ifdef copyin
+#undef copyin
+#endif
 extern "C" int copyin(const void *uaddr, void *kaddr, size_t len);
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size);
 struct _vm_map;

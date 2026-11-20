@@ -31,10 +31,14 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 #define DF_MFB_PHYS 0x7ce6a000ULL
 #define DF_MFB_W 1080
 #define DF_MFB_H 2400
+#define DF_L0_PHYS 0x7c430000ULL
+#define DF_L0_STRIDE 4352
+#define DF_L0_H 2460
 
 static mach_vm_address_t g_user_fb_addr = 0;
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
 static uint32_t *g_sw_fb_kva = NULL;
+static volatile uint32_t *df_l0va = NULL;
 
 static void df_flush_fb(void) {
   if (df_wdt) {
@@ -49,7 +53,30 @@ static void df_flush_fb(void) {
   __asm__ volatile("dsb sy" ::: "memory");
 }
 
+static void df_clear_l0(void) {
+  size_t bytes = (size_t)DF_L0_STRIDE * DF_L0_H;
+  if (!df_l0va) {
+    df_l0va = (volatile uint32_t *)ml_io_map_unmappable(DF_L0_PHYS,
+                                                        (vm_size_t)bytes);
+  }
+  if (!df_l0va)
+    return;
+  size_t words = bytes / 4;
+  for (size_t i = 0; i < words; i++) {
+    df_l0va[i] = 0xff000000U;
+  }
+  for (uintptr_t a = (uintptr_t)df_l0va; a < (uintptr_t)df_l0va + bytes;
+       a += 64) {
+    __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+  }
+  __asm__ volatile("dsb sy" ::: "memory");
+  if (df_wdt) {
+    df_wdt[0x08 / 4] = 0x1971;
+  }
+}
+
 static void df_clear_fb(void) {
+  df_clear_l0();
   if (!df_fbva)
     return;
   for (size_t i = 0; i < (size_t)DF_MFB_W * DF_MFB_H; i++) {
@@ -60,6 +87,10 @@ static void df_clear_fb(void) {
 
 class IOMobileFramebuffer : public IOService {
   OSDeclareDefaultStructors(IOMobileFramebuffer);
+
+  IOWorkLoop *fBootWL;
+  IOTimerEventSource *fWdtTimer;
+  static void wdtTimerAction(OSObject *owner, IOTimerEventSource *sender);
 
 public:
   virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -203,9 +234,29 @@ IOReturn DFIOAcceleratorUC::clientClose(void) {
 
 static unsigned df_mfb_logs;
 
+void IOMobileFramebuffer::wdtTimerAction(OSObject *owner,
+                                         IOTimerEventSource *sender) {
+  if (df_wdt) {
+    df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
+  }
+  if (sender) {
+    sender->setTimeoutMS(500);
+  }
+}
+
 bool IOMobileFramebuffer::start(IOService *provider) {
   if (!IOService::start(provider)) {
     return false;
+  }
+  fBootWL = IOWorkLoop::workLoop();
+  fWdtTimer = NULL;
+  if (fBootWL) {
+    fWdtTimer = IOTimerEventSource::timerEventSource(
+        this, &IOMobileFramebuffer::wdtTimerAction);
+    if (fWdtTimer) {
+      fBootWL->addEventSource(fWdtTimer);
+      fWdtTimer->setTimeoutMS(500);
+    }
   }
   setProperty("DisplayWidth", DF_MFB_W, 32);
   setProperty("DisplayHeight", DF_MFB_H, 32);
@@ -478,7 +529,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     if (a->structureInput && a->structureInputSize >= 0x60) {
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
-      if (s_swap_cnt <= 20) {
+      if (s_swap_cnt <= 40) {
         printf("mfb: SwapEnd #%u sid=%u nz=%u nb=%u [0]=0x%x [mid]=0x%x\n",
                s_swap_cnt, s0, nonzero, nonblack,
                g_sw_fb_kva ? g_sw_fb_kva[0] : 0,

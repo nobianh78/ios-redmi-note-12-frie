@@ -59,15 +59,33 @@ static void df_clear_l0(void) {
     df_l0va = (volatile uint32_t *)ml_io_map_unmappable(DF_L0_PHYS,
                                                         (vm_size_t)bytes);
   }
-  if (!df_l0va)
-    return;
-  size_t words = bytes / 4;
-  for (size_t i = 0; i < words; i++) {
-    df_l0va[i] = 0xff000000U;
+  if (df_l0va) {
+    size_t words = bytes / 4;
+    for (size_t i = 0; i < words; i++) {
+      df_l0va[i] = 0xff000000U;
+    }
+    for (uintptr_t a = (uintptr_t)df_l0va; a < (uintptr_t)df_l0va + bytes;
+         a += 64) {
+      __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+    }
   }
-  for (uintptr_t a = (uintptr_t)df_l0va; a < (uintptr_t)df_l0va + bytes;
-       a += 64) {
-    __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+  /* Also clear bottom 60 rows (2400..2459) of OVL0 L3 (1080x2460) so no blue strip remains */
+  size_t tail_bytes = (size_t)DF_MFB_W * (DF_L0_H - DF_MFB_H) * 4;
+  static volatile uint32_t *df_l3_tail = NULL;
+  if (!df_l3_tail) {
+    df_l3_tail = (volatile uint32_t *)ml_io_map_unmappable(
+        DF_MFB_PHYS + (vm_offset_t)DF_MFB_W * DF_MFB_H * 4,
+        (vm_size_t)tail_bytes);
+  }
+  if (df_l3_tail) {
+    size_t tw = tail_bytes / 4;
+    for (size_t i = 0; i < tw; i++) {
+      df_l3_tail[i] = 0xff000000U;
+    }
+    for (uintptr_t a = (uintptr_t)df_l3_tail;
+         a < (uintptr_t)df_l3_tail + tail_bytes; a += 64) {
+      __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+    }
   }
   __asm__ volatile("dsb sy" ::: "memory");
   if (df_wdt) {

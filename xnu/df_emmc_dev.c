@@ -260,7 +260,7 @@ df_sc_dump(void)
 
 /* Writes to the root never reach the card: they land in a RAM copy-on-write overlay of 4 KB pages
  * (lost at reboot). Open-addressing table page -> 4 KB buffer, filled from the eMMC on first write. */
-#define DFE_OV_SLOTS (1u << 17)   /* up to 128K pages = 512 MB of changed data */
+#define DFE_OV_SLOTS (1u << 14)   /* up to 16K pages = 64 MB of changed data (256 KB tables) */
 static uint64_t *dfe_ov_key;     /* page + 1, 0 = empty */
 static uint8_t **dfe_ov_val;
 static uint32_t dfe_ov_n;
@@ -272,13 +272,22 @@ dfe_ov_find(uint64_t page, int create)
 		if (!create) {
 			return NULL;
 		}
-		dfe_ov_key = kalloc_data(DFE_OV_SLOTS * sizeof(uint64_t), Z_WAITOK | Z_ZERO);
-		dfe_ov_val = kalloc_data(DFE_OV_SLOTS * sizeof(uint8_t *), Z_WAITOK | Z_ZERO);
+		lck_mtx_unlock(&dfe_mtx);
+		uint64_t *k = kalloc_data(DFE_OV_SLOTS * sizeof(uint64_t), Z_WAITOK | Z_ZERO);
+		uint8_t **v = kalloc_data(DFE_OV_SLOTS * sizeof(uint8_t *), Z_WAITOK | Z_ZERO);
+		lck_mtx_lock(&dfe_mtx);
+		if (!dfe_ov_key) {
+			dfe_ov_key = k;
+			dfe_ov_val = v;
+		} else {
+			if (k) kfree_data(k, DFE_OV_SLOTS * sizeof(uint64_t));
+			if (v) kfree_data(v, DFE_OV_SLOTS * sizeof(uint8_t *));
+		}
 		if (!dfe_ov_key || !dfe_ov_val) {
 			return NULL;
 		}
 	}
-	uint32_t h = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 47) & (DFE_OV_SLOTS - 1);
+	uint32_t h = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 50) & (DFE_OV_SLOTS - 1);
 	for (uint32_t i = 0; i < DFE_OV_SLOTS; i++, h = (h + 1) & (DFE_OV_SLOTS - 1)) {
 		if (dfe_ov_key[h] == page + 1) {
 			return dfe_ov_val[h];
@@ -287,8 +296,29 @@ dfe_ov_find(uint64_t page, int create)
 			if (!create || dfe_ov_n >= DFE_OV_SLOTS * 3 / 4) {
 				return NULL;
 			}
-			uint8_t *v = kalloc_data(4096, Z_WAITOK);
-			if (!v || df_emmc_readn((uint32_t)(df_emmc_super_lba + page * 8), 8, v)) {
+			uint8_t *v = kalloc_data(4096, Z_NOWAIT);
+			if (!v) {
+				lck_mtx_unlock(&dfe_mtx);
+				v = kalloc_data(4096, Z_WAITOK);
+				lck_mtx_lock(&dfe_mtx);
+				if (!v) {
+					return NULL;
+				}
+				/* Re-probe after re-acquiring dfe_mtx */
+				uint32_t h2 = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 50) & (DFE_OV_SLOTS - 1);
+				for (uint32_t j = 0; j < DFE_OV_SLOTS; j++, h2 = (h2 + 1) & (DFE_OV_SLOTS - 1)) {
+					if (dfe_ov_key[h2] == page + 1) {
+						kfree_data(v, 4096);
+						return dfe_ov_val[h2];
+					}
+					if (!dfe_ov_key[h2]) {
+						h = h2;
+						break;
+					}
+				}
+			}
+			if (df_emmc_readn((uint32_t)(df_emmc_super_lba + page * 8), 8, v)) {
+				kfree_data(v, 4096);
 				return NULL;
 			}
 			dfe_ov_val[h] = v;

@@ -6,6 +6,7 @@
  * ("mfb sel ...") and answered with success and zeroed output, so the log shows
  * which selectors backboardd/QuartzCore need. clientMemoryForType hands out the
  * MT6768 framebuffer the df console draws into. */
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOUserClient.h>
@@ -29,6 +30,8 @@ extern "C" kern_return_t mach_vm_allocate(vm_map_t target,
 #define DF_MFB_H 2400
 
 static mach_vm_address_t g_user_fb_addr = 0;
+static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
+static uint32_t *g_sw_fb_kva = NULL;
 
 static void df_flush_fb(void) {
   if (df_wdt) {
@@ -433,12 +436,23 @@ IOReturn DFMobileFramebufferUC::externalMethod(
           DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
     }
     s_swap_cnt++;
+    uint32_t nonblack = 0;
+    if (g_sw_fb_kva && df_fbva) {
+      size_t n = (size_t)DF_MFB_W * DF_MFB_H;
+      for (size_t i = 0; i < n; i++) {
+        uint32_t px = g_sw_fb_kva[i];
+        df_fbva[i] = px;
+        if ((px & 0x00ffffffU) != 0) {
+          nonblack++;
+        }
+      }
+    }
     if (a->structureInput && a->structureInputSize >= 0x60) {
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
       if (s_swap_cnt <= 20) {
-        printf("mfb: SwapEnd #%u layer0 surface_id=%u [0]=0x%x [mid]=0x%x\n",
-               s_swap_cnt, s0,
+        printf("mfb: SwapEnd #%u sid=%u nonblack=%u [0]=0x%x [mid]=0x%x\n",
+               s_swap_cnt, s0, nonblack,
                df_fbva ? df_fbva[0] : 0,
                df_fbva ? df_fbva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
@@ -447,6 +461,12 @@ IOReturn DFMobileFramebufferUC::externalMethod(
   }
   if (selector == 6) {
     /* SwapWait */
+    if (g_sw_fb_kva && df_fbva) {
+      size_t n = (size_t)DF_MFB_W * DF_MFB_H;
+      for (size_t i = 0; i < n; i++) {
+        df_fbva[i] = g_sw_fb_kva[i];
+      }
+    }
     df_flush_fb();
   }
   return kIOReturnSuccess;
@@ -592,20 +612,27 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
       }
     }
 
-    /* Map physical LCD framebuffer (1080x2400x4 = 10,368,000 bytes) into task
-     * address space */
+    /* Back IOSurface with normal cacheable RAM (1080x2400x4 = 10,368,000 bytes)
+     * so CA::OGL::SWContext can use NEON SIMD writes without Device-nGnRE
+     * alignment faults; SwapEnd blits scalar 32-bit pixels into df_fbva. */
+    if (!g_sw_fb_md) {
+      g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
+          kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
+          (vm_size_t)DF_MFB_W * DF_MFB_H * 4, page_size);
+      if (g_sw_fb_md) {
+        g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
+        if (g_sw_fb_kva) {
+          bzero(g_sw_fb_kva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+        }
+        printf("ios: allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
+      }
+    }
     if (!fUserFbAddr) {
-      if (t) {
-        IOMemoryDescriptor *fb_md = IOMemoryDescriptor::withPhysicalAddress(
-            DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4,
-            kIODirectionInOut);
-        if (fb_md) {
-          IOMemoryMap *fb_map =
-              fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
-          if (fb_map) {
-            fUserFbAddr = fb_map->getAddress();
-          }
-          fb_md->release();
+      if (t && g_sw_fb_md) {
+        IOMemoryMap *fb_map =
+            g_sw_fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
+        if (fb_map) {
+          fUserFbAddr = fb_map->getAddress();
         }
       }
       if (!fUserFbAddr && map) {

@@ -318,7 +318,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     msg.msgh_size = sizeof(msg);
     msg.msgh_remote_port = uc->fNotifyPort;
     msg.msgh_local_port = MACH_PORT_NULL;
-    msg.msgh_voucher_port = MACH_PORT_NULL;
+    msg.msgh_voucher_port = 0;
     msg.msgh_id = 0;
     mach_msg_return_t mr = mach_msg_send_from_kernel_proper(&msg, sizeof(msg));
     if (++s_notify_cnt <= 5) {

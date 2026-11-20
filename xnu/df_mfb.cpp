@@ -24,6 +24,9 @@ extern "C" vm_map_t get_task_map(task_t task);
 extern "C" kern_return_t mach_vm_allocate(vm_map_t target,
                                           mach_vm_address_t *address,
                                           mach_vm_size_t size, int flags);
+extern "C" mach_msg_return_t
+mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
+                                 mach_msg_size_t send_size);
 
 #define DF_MFB_PHYS 0x7ce6a000ULL
 #define DF_MFB_W 1080
@@ -77,6 +80,7 @@ class DFMobileFramebufferUC : public IOUserClient {
   IOWorkLoop *fWL;
   IOTimerEventSource *fVsyncTimer;
   DFAsyncSlot fAsync[4];
+  mach_port_t fNotifyPort;
   uint64_t fVsyncCount;
   static void vsyncTimerAction(OSObject *owner, IOTimerEventSource *sender);
 
@@ -251,6 +255,7 @@ bool DFMobileFramebufferUC::start(IOService *provider) {
   }
   fWL = NULL;
   fVsyncTimer = NULL;
+  fNotifyPort = MACH_PORT_NULL;
   fVsyncCount = 0;
   bzero(fAsync, sizeof(fAsync));
   fWL = IOWorkLoop::workLoop();
@@ -266,6 +271,7 @@ bool DFMobileFramebufferUC::start(IOService *provider) {
 }
 
 void DFMobileFramebufferUC::stop(IOService *provider) {
+  fNotifyPort = MACH_PORT_NULL;
   if (fVsyncTimer) {
     fVsyncTimer->cancelTimeout();
     if (fWL) {
@@ -304,6 +310,21 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
       }
     }
   }
+  if (uc->fNotifyPort != MACH_PORT_NULL && (uc->fVsyncCount % 3) == 0) {
+    static uint32_t s_notify_cnt = 0;
+    mach_msg_header_t msg;
+    bzero(&msg, sizeof(msg));
+    msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    msg.msgh_size = sizeof(msg);
+    msg.msgh_remote_port = uc->fNotifyPort;
+    msg.msgh_local_port = MACH_PORT_NULL;
+    msg.msgh_voucher_port = MACH_PORT_NULL;
+    msg.msgh_id = 0;
+    mach_msg_return_t mr = mach_msg_send_from_kernel_proper(&msg, sizeof(msg));
+    if (++s_notify_cnt <= 5) {
+      printf("mfb: notify type=3 #%u -> 0x%x\n", s_notify_cnt, (unsigned)mr);
+    }
+  }
   if (sender) {
     sender->setTimeoutMS(33);
   }
@@ -313,6 +334,9 @@ IOReturn DFMobileFramebufferUC::registerNotificationPort(
     mach_port_t port, UInt32 type, io_user_reference_t refCon) {
   printf("mfb: registerNotificationPort type=%u port=%p refCon=0x%llx pid=%d\n",
          (unsigned)type, (void *)port, (unsigned long long)refCon, proc_selfpid());
+  if (type == 3 && port != MACH_PORT_NULL) {
+    fNotifyPort = port;
+  }
   return kIOReturnSuccess;
 }
 
@@ -437,13 +461,17 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     }
     s_swap_cnt++;
     uint32_t nonblack = 0;
+    uint32_t nonzero = 0;
     if (g_sw_fb_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
       for (size_t i = 0; i < n; i++) {
         uint32_t px = g_sw_fb_kva[i];
-        df_fbva[i] = px;
-        if ((px & 0x00ffffffU) != 0) {
-          nonblack++;
+        df_fbva[i] = px | 0xff000000U;
+        if (px != 0) {
+          nonzero++;
+          if ((px & 0x00ffffffU) != 0) {
+            nonblack++;
+          }
         }
       }
     }
@@ -451,10 +479,10 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
       if (s_swap_cnt <= 20) {
-        printf("mfb: SwapEnd #%u sid=%u nonblack=%u [0]=0x%x [mid]=0x%x\n",
-               s_swap_cnt, s0, nonblack,
-               df_fbva ? df_fbva[0] : 0,
-               df_fbva ? df_fbva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
+        printf("mfb: SwapEnd #%u sid=%u nz=%u nb=%u [0]=0x%x [mid]=0x%x\n",
+               s_swap_cnt, s0, nonzero, nonblack,
+               g_sw_fb_kva ? g_sw_fb_kva[0] : 0,
+               g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
     df_flush_fb();
@@ -464,7 +492,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     if (g_sw_fb_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
       for (size_t i = 0; i < n; i++) {
-        df_fbva[i] = g_sw_fb_kva[i];
+        df_fbva[i] = g_sw_fb_kva[i] | 0xff000000U;
       }
     }
     df_flush_fb();

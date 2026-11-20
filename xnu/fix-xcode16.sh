@@ -602,7 +602,8 @@ df_irq_stat(uint32_t id)
 	uint64_t ctl, tval;
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
-	if (0 && (id == 27 || id == 30) && df_cons_last) {   /* HANG reporter off: idle WFI gave false reports */   /* hang report: where the interrupted CPU was, every 5 s of silence */
+	extern int df_gui_active;
+	if (!df_gui_active && (id == 27 || id == 30) && df_cons_last) {   /* hang report during boot: where the interrupted CPU was, every 5 s of silence */
 		uint64_t df_now, df_frq;
 		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
 		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(df_frq));
@@ -1202,7 +1203,7 @@ perl -0pi -e 's|(\tcnode_locked = 1;\n\n\tfilebytes = hfs_blk_to_bytes)|\tDFW("B
 perl -0pi -e 's|(\n\tif \(hfs_start_transaction\(hfsmp\) != 0\) \{\n\t\tretval = EINVAL;)|\n\tDFW("C start transaction");$1|' "$hrw"
 perl -0pi -e 's|(\n\t\tretval = MacToVFSError\(ExtendFileC \(hfsmp, \(FCB\*\)fp, bytesToAdd,)|\n\t\tDFW("D ExtendFileC");$1|' "$hrw"
 perl -0pi -e 's|(\n\t\thfs_systemfile_unlock\(hfsmp, lockflags\);\n)(\n\t\tif \(\(actualBytesAdded == 0\))|$1\t\tDFW("E extended");\n$2|' "$hrw"
-perl -0pi -e 's|(\n\t\tretval = cluster_write\(vp, uio, fp->ff_size, filesize, head_off,)|\n\t\tDFW("F cluster_write");$1|' "$hrw"
+perl -0pi -e 's|\n\t\tretval = cluster_write\((vp, uio, fp->ff_size, filesize, head_off,[^,]+,)\s*([^)]+)\);|\n\t\tDFW("F cluster_write");\n\t\tretval = cluster_write($1 ($2) & ~IO_SYNC);\n\t\tDFW("G cluster_done");|' "$hrw"
 for m in 'A truncate lock' 'B cnode locked' 'C start transaction' 'D ExtendFileC' 'E extended' 'F cluster_write'; do grep -q "$m" "$hrw" || { echo "fix-xcode16: hfs write breadcrumb '$m' missing"; exit 1; }; done
 #        Kernel headers include <TargetConditionals.h> on the kext path (osfmk/kern/debug.h) and the xnu
 #        tree has none. Not in EXTERNAL_HEADERS: corecrypto/cc_config.h probes __has_include(<TargetConditionals.h>),

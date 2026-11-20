@@ -7,7 +7,9 @@
  * which selectors backboardd/QuartzCore need. clientMemoryForType hands out the
  * MT6768 framebuffer the df console draws into. */
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/IOWorkLoop.h>
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
@@ -60,10 +62,26 @@ public:
                                  IOUserClient **handler) APPLE_KEXT_OVERRIDE;
 };
 
+struct DFAsyncSlot {
+  bool active;
+  uint32_t selector;
+  OSAsyncReference64 ref;
+};
+
 class DFMobileFramebufferUC : public IOUserClient {
   OSDeclareDefaultStructors(DFMobileFramebufferUC);
 
+  IOWorkLoop *fWL;
+  IOTimerEventSource *fVsyncTimer;
+  DFAsyncSlot fAsync[4];
+  uint64_t fVsyncCount;
+  static void vsyncTimerAction(OSObject *owner, IOTimerEventSource *sender);
+
 public:
+  virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+  virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+  virtual IOReturn registerNotificationPort(mach_port_t port, UInt32 type,
+                                            io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
   virtual IOReturn externalMethod(uint32_t selector,
                                   IOExternalMethodArguments *args,
                                   IOExternalMethodDispatch *dispatch,
@@ -224,13 +242,108 @@ IOReturn IOMobileFramebuffer::newUserClient(task_t owningTask, void *securityID,
   return kIOReturnSuccess;
 }
 
+bool DFMobileFramebufferUC::start(IOService *provider) {
+  if (!IOUserClient::start(provider)) {
+    return false;
+  }
+  fWL = NULL;
+  fVsyncTimer = NULL;
+  fVsyncCount = 0;
+  bzero(fAsync, sizeof(fAsync));
+  fWL = IOWorkLoop::workLoop();
+  if (fWL) {
+    fVsyncTimer = IOTimerEventSource::timerEventSource(
+        this, &DFMobileFramebufferUC::vsyncTimerAction);
+    if (fVsyncTimer) {
+      fWL->addEventSource(fVsyncTimer);
+      fVsyncTimer->setTimeoutMS(33);
+    }
+  }
+  return true;
+}
+
+void DFMobileFramebufferUC::stop(IOService *provider) {
+  if (fVsyncTimer) {
+    fVsyncTimer->cancelTimeout();
+    if (fWL) {
+      fWL->removeEventSource(fVsyncTimer);
+    }
+    fVsyncTimer->release();
+    fVsyncTimer = NULL;
+  }
+  if (fWL) {
+    fWL->release();
+    fWL = NULL;
+  }
+  IOUserClient::stop(provider);
+}
+
+void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
+                                             IOTimerEventSource *sender) {
+  DFMobileFramebufferUC *uc = OSDynamicCast(DFMobileFramebufferUC, owner);
+  if (!uc) {
+    return;
+  }
+  if (df_wdt) {
+    df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
+  }
+  uc->fVsyncCount++;
+  uint64_t now = 0;
+  clock_get_uptime(&now);
+  for (int i = 0; i < 4; i++) {
+    if (uc->fAsync[i].active) {
+      io_user_reference_t args[2] = { (io_user_reference_t)now,
+                                      (io_user_reference_t)uc->fVsyncCount };
+      IOReturn r = sendAsyncResult64(uc->fAsync[i].ref, kIOReturnSuccess, args, 2);
+      if (uc->fVsyncCount <= 5) {
+        printf("mfb: vsync #%llu sel=%u sendAsync -> 0x%x\n",
+               (unsigned long long)uc->fVsyncCount, uc->fAsync[i].selector, r);
+      }
+    }
+  }
+  if (sender) {
+    sender->setTimeoutMS(33);
+  }
+}
+
+IOReturn DFMobileFramebufferUC::registerNotificationPort(
+    mach_port_t port, UInt32 type, io_user_reference_t refCon) {
+  printf("mfb: registerNotificationPort type=%u port=%p refCon=0x%llx pid=%d\n",
+         (unsigned)type, (void *)port, (unsigned long long)refCon, proc_selfpid());
+  return kIOReturnSuccess;
+}
+
 IOReturn DFMobileFramebufferUC::externalMethod(
     uint32_t selector, IOExternalMethodArguments *a,
     IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) {
   if (df_mfb_logs++ < 400) {
-    printf("mfb sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
-           a->scalarInputCount, a->structureInputSize, a->scalarOutputCount,
-           a->structureOutputSize);
+    printf("mfb sel %u pid %d in %u/%u out %u/%u async=%d\n", selector,
+           proc_selfpid(), a->scalarInputCount, a->structureInputSize,
+           a->scalarOutputCount, a->structureOutputSize,
+           a->asyncWakePort != MACH_PORT_NULL ? 1 : 0);
+  }
+  if (a->asyncWakePort != MACH_PORT_NULL && a->asyncReference) {
+    printf("mfb: ASYNC sel %u pid %d refCnt=%u\n", selector, proc_selfpid(),
+           a->asyncReferenceCount);
+    int slot = -1;
+    for (int i = 0; i < 4; i++) {
+      if (fAsync[i].active && fAsync[i].selector == selector) {
+        slot = i;
+        break;
+      }
+      if (!fAsync[i].active && slot < 0) {
+        slot = i;
+      }
+    }
+    if (slot >= 0) {
+      fAsync[slot].active = true;
+      fAsync[slot].selector = selector;
+      for (uint32_t i = 0; i < kOSAsyncRef64Count; i++) {
+        fAsync[slot].ref[i] =
+            (i < a->asyncReferenceCount) ? a->asyncReference[i] : 0;
+      }
+      fAsync[slot].ref[0] = (io_user_reference_t)(uintptr_t)a->asyncWakePort;
+    }
   }
   for (uint32_t i = 0; i < a->scalarOutputCount; i++) {
     a->scalarOutput[i] = 0;

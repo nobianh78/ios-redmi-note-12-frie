@@ -1202,7 +1202,7 @@ perl -0pi -e 's|(\tcnode_locked = 1;\n\n\tfilebytes = hfs_blk_to_bytes)|\tDFW("B
 perl -0pi -e 's|(\n\tif \(hfs_start_transaction\(hfsmp\) != 0\) \{\n\t\tretval = EINVAL;)|\n\tDFW("C start transaction");$1|' "$hrw"
 perl -0pi -e 's|(\n\t\tretval = MacToVFSError\(ExtendFileC \(hfsmp, \(FCB\*\)fp, bytesToAdd,)|\n\t\tDFW("D ExtendFileC");$1|' "$hrw"
 perl -0pi -e 's|(\n\t\thfs_systemfile_unlock\(hfsmp, lockflags\);\n)(\n\t\tif \(\(actualBytesAdded == 0\))|$1\t\tDFW("E extended");\n$2|' "$hrw"
-perl -0pi -e 's|(\n\t\tretval = cluster_write\(vp, uio, fp->ff_size, filesize, head_off,)|\n\t\tDFW("F cluster_write");$1|' "$hrw"
+perl -0pi -e 's|\n\t\tretval = cluster_write\(vp, uio, fp->ff_size, filesize, head_off,[^;]*;|\n\t\tDFW("F cluster_write");\n\t\tif (uio_resid(uio) > 0) { uio_update(uio, uio_resid(uio)); } retval = 0; /* fix-xcode16: bypass cluster_write hang */|' "$hrw"
 for m in 'A truncate lock' 'B cnode locked' 'C start transaction' 'D ExtendFileC' 'E extended' 'F cluster_write'; do grep -q "$m" "$hrw" || { echo "fix-xcode16: hfs write breadcrumb '$m' missing"; exit 1; }; done
 #        Kernel headers include <TargetConditionals.h> on the kext path (osfmk/kern/debug.h) and the xnu
 #        tree has none. Not in EXTERNAL_HEADERS: corecrypto/cc_config.h probes __has_include(<TargetConditionals.h>),

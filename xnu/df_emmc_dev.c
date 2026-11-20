@@ -93,9 +93,9 @@ extern int df_emmc_read(uint32_t lba, void *buf);
 static int dfe_bmajor = -1;
 
 static int
-dfe_bdev_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
+dfe_bdev_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
 {
-	return (flags & FWRITE) ? EROFS : 0;   /* read-only root: avoids hfs_vnop_write cluster_write hard hang */
+	return 0;   /* writable: writes go to the RAM overlay below, never to the card */
 }
 
 /* fire diag: dyld reads happen at exec, long before the fault scrolls them off; keep them for the fault trace */

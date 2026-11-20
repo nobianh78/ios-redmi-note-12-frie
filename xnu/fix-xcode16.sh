@@ -635,6 +635,31 @@ df_irq_stat(uint32_t id)
 			}
 		}
 	}
+	if (df_gui_active && (id == 27 || id == 30)) {
+		extern volatile uint64_t dfu_last_poll_cnt;
+		extern void dfu_poll_irq(void);
+		static uint64_t df_gui_hang_last;
+		uint64_t df_now, df_frq;
+		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
+		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(df_frq));
+		if (df_frq && dfu_last_poll_cnt && df_now - dfu_last_poll_cnt > 2 * df_frq) {
+			dfu_poll_irq();
+			if (df_now - df_gui_hang_last > 3 * df_frq) {
+				extern uint64_t df_irq_pc, df_irq_lr, df_irq_ps;
+				df_gui_hang_last = df_now;
+				const char *hdr = "GUIHANG pc=";
+				while (*hdr) df_usb_putc(*hdr++);
+				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_pc >> sh) & 15]);
+				hdr = " lr=";
+				while (*hdr) df_usb_putc(*hdr++);
+				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_lr >> sh) & 15]);
+				hdr = " ps=";
+				while (*hdr) df_usb_putc(*hdr++);
+				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_ps >> sh) & 15]);
+				df_usb_putc('\r'); df_usb_putc('\n');
+			}
+		}
+	}
 	if (id == 0xffffffffu) {
 		df_irq_done++;
 	} else {

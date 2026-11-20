@@ -333,7 +333,7 @@ bool DFMobileFramebufferUC::start(IOService *provider) {
         this, &DFMobileFramebufferUC::vsyncTimerAction);
     if (fVsyncTimer) {
       fWL->addEventSource(fVsyncTimer);
-      fVsyncTimer->setTimeoutMS(33);
+      fVsyncTimer->setTimeoutMS(250);
     }
   }
   return true;
@@ -379,7 +379,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
       }
     }
   }
-  if (uc->fNotifyPort != MACH_PORT_NULL && (uc->fVsyncCount % 3) == 0) {
+  if (uc->fNotifyPort != MACH_PORT_NULL) {
     static uint32_t s_notify_cnt = 0;
     mach_msg_header_t msg;
     bzero(&msg, sizeof(msg));
@@ -395,7 +395,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     }
   }
   if (sender) {
-    sender->setTimeoutMS(33);
+    sender->setTimeoutMS(250);
   }
 }
 

@@ -70,11 +70,14 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void IOSleep(unsigned int ms);
 extern void cons_cinput(char ch);
 extern int kernel_thread_start(void (*fn)(void *, int), void *arg, void **thread);
+extern int kernel_thread_start_priority(void (*fn)(void *, int), void *arg, int priority, void **thread);
 extern void thread_deallocate(void *thread);
 extern int ml_set_interrupts_enabled(int enable);
 
 static volatile uint8_t *dfu;           /* MUSB registers */
 static int dfu_configured, dfu_hs, dfu_seen_reset;
+static volatile int dfu_in_poll;
+volatile uint64_t dfu_last_poll_cnt;
 
 static inline uint8_t  dfu_r8(unsigned o)  { return dfu[o]; }
 static inline uint16_t dfu_r16(unsigned o) { return *(volatile uint16_t *)(dfu + o); }
@@ -421,6 +424,17 @@ dfu_poll(void)
 	}
 }
 
+void dfu_poll_irq(void);
+void
+dfu_poll_irq(void)
+{
+	if (dfu && dfu_configured && !dfu_in_poll) {
+		dfu_in_poll = 1;
+		dfu_poll();
+		dfu_in_poll = 0;
+	}
+}
+
 static void
 dfu_thread(void *arg, int wr)
 {
@@ -428,7 +442,12 @@ dfu_thread(void *arg, int wr)
 	(void)wr;
 	unsigned ticks = 0;
 	for (;;) {
+		int s = ml_set_interrupts_enabled(0);
+		dfu_in_poll = 1;
 		dfu_poll();
+		dfu_in_poll = 0;
+		__asm__ volatile("mrs %0, CNTVCT_EL0" : "=r"(dfu_last_poll_cnt));
+		ml_set_interrupts_enabled(s);
 		if (dfu_configured && df_wdt) {
 			df_wdt[0x08 / 4] = 0x1971;      /* host attached: keep the watchdog fed */
 		}
@@ -513,7 +532,9 @@ df_usb_start(void)
 	df_ps_puts("fire usb: soft-connect\n");
 
 	void *th = 0;
-	if (kernel_thread_start(dfu_thread, 0, &th) == 0 && th) {
+	if (kernel_thread_start_priority(dfu_thread, 0, 95, &th) == 0 && th) {
+		thread_deallocate(th);
+	} else if (kernel_thread_start(dfu_thread, 0, &th) == 0 && th) {
 		thread_deallocate(th);
 	} else {
 		df_ps_puts("fire usb: thread start failed\n");

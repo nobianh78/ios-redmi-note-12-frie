@@ -211,4 +211,148 @@ df_mali_probe(void)
 	    dfm_r(dfm_gpu, TILER_READY_LO), e2 ? "timeout" : "ok",
 	    dfm_r(dfm_gpu, SHADER_READY_LO), e3 ? "timeout" : "ok");
 	printf("mali: === probe done (%s) ===\n", (e1 || e2 || e3) ? "partial" : "GPU UP");
+	if (!(e1 || e2 || e3)) {
+		extern void df_mali_hello(void);
+		df_mali_hello();
+	}
+}
+
+/* ---------------- Phase 2: MMU AS0 + job manager hello world ---------------- */
+/*
+ * Mali-G52 has the AArch64 MMU (HW_FEATURE_AARCH64_MMU): standard ARMv8 stage-1 4K tables,
+ * as Mesa panfrost_mmu.c uses (io-pgtable ARM_64_LPAE_S1). VA 35 bits -> walk starts at L1.
+ * Identity map (GPU VA == PA) with 2 MB L2 blocks. All GPU memory attributes non-cacheable
+ * (AS_MEMATTR 0x4C), so the CPU cleans its caches before a job and invalidates after.
+ */
+#define MMU_IRQ_RAWSTAT   0x2000
+#define MMU_IRQ_CLEAR     0x2004
+#define AS0               0x2400
+#define AS_TRANSTAB_LO    0x00
+#define AS_TRANSTAB_HI    0x04
+#define AS_MEMATTR_LO     0x08
+#define AS_MEMATTR_HI     0x0C
+#define AS_COMMAND        0x18
+#define AS_FAULTSTATUS    0x1C
+#define AS_FAULTADDR_LO   0x20
+#define AS_FAULTADDR_HI   0x24
+#define AS_STATUS         0x28
+#define AS_TRANSCFG_LO    0x30
+#define AS_TRANSCFG_HI    0x34
+#define JOB_IRQ_RAWSTAT   0x1000
+#define JOB_IRQ_CLEAR     0x1004
+#define JS1               (0x1800 + 1 * 0x80)
+#define JS_HEAD_LO        0x00
+#define JS_HEAD_HI        0x04
+#define JS_STATUS         0x24
+#define JS_HEAD_NEXT_LO   0x40
+#define JS_HEAD_NEXT_HI   0x44
+#define JS_AFFINITY_NEXT_LO 0x50
+#define JS_AFFINITY_NEXT_HI 0x54
+#define JS_CONFIG_NEXT    0x58
+#define JS_COMMAND_NEXT   0x60
+
+/* one 16 KB kernel page, physically contiguous: L1 | L2 A | L2 B | jobs + results */
+static uint8_t dfm_mem[0x4000] __attribute__((aligned(0x4000)));
+
+static void
+dfm_clean(const void *p, size_t len)
+{
+	uintptr_t a = (uintptr_t)p & ~63UL, e = (uintptr_t)p + len;
+	for (; a < e; a += 64) {
+		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static int
+dfm_as_cmd(uint32_t cmd)
+{
+	dfm_w(dfm_gpu, AS0 + AS_COMMAND, cmd);
+	return dfm_wait(dfm_gpu, AS0 + AS_STATUS, 1, 0, 100000);   /* AS_ACTIVE clear */
+}
+
+static void
+dfm_map_gb(uint64_t *l1, uint64_t *l2, uint64_t l2_pa, uint64_t pa_any)
+{
+	uint64_t gb = pa_any >> 30;
+	l1[gb] = l2_pa | 3;                              /* table descriptor */
+	for (uint64_t i = 0; i < 512; i++) {
+		uint64_t pa = (gb << 30) | (i << 21);
+		/* block: valid, AttrIdx 0, AP[1]=1 (EL0 RW), AF, nG */
+		l2[i] = pa | 1 | (1ULL << 6) | (1ULL << 10) | (1ULL << 11);
+	}
+}
+
+void df_mali_hello(void);
+void
+df_mali_hello(void)
+{
+	uint64_t base_pa = ml_vtophys((vm_offset_t)dfm_mem);
+	uint64_t *l1 = (uint64_t *)(dfm_mem + 0x0000);
+	uint64_t *l2a = (uint64_t *)(dfm_mem + 0x1000);
+	uint64_t *l2b = (uint64_t *)(dfm_mem + 0x2000);
+	uint8_t *jobs = dfm_mem + 0x3000;
+	volatile uint64_t *result = (volatile uint64_t *)(dfm_mem + 0x3800);
+	printf("mali: hello: page va %p pa 0x%llx\n", dfm_mem, base_pa);
+	if (!base_pa) {
+		return;
+	}
+	bzero(dfm_mem, sizeof(dfm_mem));
+	dfm_map_gb(l1, l2a, base_pa + 0x1000, base_pa);                 /* our page's GB */
+	if ((0x7ce6a000ULL >> 30) != (base_pa >> 30)) {
+		dfm_map_gb(l1, l2b, base_pa + 0x2000, 0x7ce6a000ULL);   /* framebuffer GB */
+	}
+	*result = 0x1111111111111111ULL;
+
+	/* WRITE_VALUE job: 32 B header + payload (address, type=Immediate 64, value) */
+	uint32_t *h = (uint32_t *)jobs;
+	h[4] = (1u << 0) | (2u << 1);       /* +0x10: 64-bit descriptor, job_type WRITE_VALUE=2 */
+	h[4] |= (1u << 16);                 /* +0x12: job_index = 1 */
+	uint64_t *pl = (uint64_t *)(jobs + 0x20);
+	pl[0] = base_pa + 0x3800;           /* address (GPU VA == PA) */
+	pl[1] = 7;                          /* type: Immediate 64 */
+	pl[2] = 0xCAFEBABE12345678ULL;      /* value */
+	dfm_clean(dfm_mem, sizeof(dfm_mem));
+
+	/* AS0: tables, memattr (all non-cacheable), AArch64 4K, 35-bit input addresses */
+	uint64_t transcfg = 6ULL /* ADRMODE_AARCH64_4K */ | ((uint64_t)(55 - 35) << 6) /* INA_BITS */ |
+	    (1ULL << 24) /* PTW non-cacheable */;
+	dfm_w(dfm_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_LO, (uint32_t)base_pa);
+	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_HI, (uint32_t)(base_pa >> 32));
+	dfm_w(dfm_gpu, AS0 + AS_MEMATTR_LO, 0x4C4C4C4Cu);
+	dfm_w(dfm_gpu, AS0 + AS_MEMATTR_HI, 0x4C4C4C4Cu);
+	dfm_w(dfm_gpu, AS0 + AS_TRANSCFG_LO, (uint32_t)transcfg);
+	dfm_w(dfm_gpu, AS0 + AS_TRANSCFG_HI, (uint32_t)(transcfg >> 32));
+	int ea = dfm_as_cmd(1 /* UPDATE */);
+	printf("mali: AS0 update %s transcfg 0x%llx status 0x%x\n", ea ? "TIMEOUT" : "ok",
+	    transcfg, dfm_r(dfm_gpu, AS0 + AS_STATUS));
+
+	/* submit on job slot 1, AS0, flush clean+invalidate at start and end */
+	uint64_t t0 = mach_absolute_time();
+	dfm_w(dfm_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+	uint64_t job_va = base_pa + 0x3000;
+	dfm_w(dfm_gpu, JS1 + JS_HEAD_NEXT_LO, (uint32_t)job_va);
+	dfm_w(dfm_gpu, JS1 + JS_HEAD_NEXT_HI, (uint32_t)(job_va >> 32));
+	dfm_w(dfm_gpu, JS1 + JS_AFFINITY_NEXT_LO, 0x3);
+	dfm_w(dfm_gpu, JS1 + JS_AFFINITY_NEXT_HI, 0);
+	dfm_w(dfm_gpu, JS1 + JS_CONFIG_NEXT, 0u /* AS0 */ | (3u << 8) | (3u << 12) | (8u << 16));
+	dfm_w(dfm_gpu, JS1 + JS_COMMAND_NEXT, 1 /* START */);
+	uint32_t raw = 0;
+	for (int i = 0; i < 20000; i++) {          /* ~200 ms: slot 1 DONE (bit 1) or FAIL (bit 17) */
+		raw = dfm_r(dfm_gpu, JOB_IRQ_RAWSTAT);
+		if (raw & ((1u << 1) | (1u << 17))) {
+			break;
+		}
+		dfm_udelay(10);
+	}
+	uint64_t t1 = mach_absolute_time();
+	dfm_clean((const void *)result, 64);
+	dfm_clean(jobs, 64);
+	printf("mali: job raw 0x%x js1 status 0x%x head 0x%x exc 0x%x | result 0x%llx (%s) in %llu ticks\n",
+	    raw, dfm_r(dfm_gpu, JS1 + JS_STATUS), dfm_r(dfm_gpu, JS1 + JS_HEAD_LO), h[0],
+	    *result, *result == 0xCAFEBABE12345678ULL ? "GPU WROTE IT" : "no write", t1 - t0);
+	printf("mali: mmu raw 0x%x fault 0x%x addr 0x%x%08x\n", dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT),
+	    dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS), dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_HI),
+	    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 }

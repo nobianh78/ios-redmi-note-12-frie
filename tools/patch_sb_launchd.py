@@ -121,6 +121,8 @@ def main():
         (0x18e607e84, bytes.fromhex('f657bda9f44f01a9'), 'RESTORE -[SBFUserAuthenticationController _isUserAuthenticated]'),
         # MobileKeyBag (.13): skip synchronous XPC call to com.apple.mobile.keybagd.xpc & report unlocked/no-passcode
         (0x1ae3df468, struct.pack('<II', 0x52800060, 0xd65f03c0), 'MKBGetDeviceLockState -> return 3 (kMobileLockStateDisabled)'),
+    # FBS identityForProcessIdentity: nil processIdentity -> return nil instead of brk (SB unlock crash)
+    (0x19b916914, struct.pack('<II', 0xd2800014, 0x17fffff9), 'FBS identityForProcessIdentity: nil -> return nil (no brk)'),
         (0x1ae3e7024, struct.pack('<II', 0x52800060, 0xd65f03c0), 'MKBGetDeviceLockStateIndirect -> return 3 (kMobileLockStateDisabled)'),
         (0x1ae3df824, struct.pack('<II', 0x52800020, 0xd65f03c0), 'MKBDeviceUnlockedSinceBoot -> return 1'),
         (0x1ae3dfb0c, struct.pack('<II', 0x52800020, 0xd65f03c0), 'MKBUserUnlockedSinceBoot -> return 1'),

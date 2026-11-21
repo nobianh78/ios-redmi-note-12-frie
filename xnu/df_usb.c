@@ -398,9 +398,9 @@ dfu_bulk(int in_irq)
 					}
 					continue;
 				}
-				if (buf[i] == 0x14 || buf[i] == 0x19 || buf[i] == 0x07) {
+				if (buf[i] == 0x14 || buf[i] == 0x19 || buf[i] == 0x07 || buf[i] == 0x10) {
 					extern volatile int df_touch_test_req;
-					df_touch_test_req = (buf[i] == 0x14) ? 1 : (buf[i] == 0x19 ? 2 : 3);
+					df_touch_test_req = (buf[i] == 0x14) ? 1 : (buf[i] == 0x19 ? 2 : (buf[i] == 0x10 ? 4 : 3));
 					continue;
 				}
 				cons_cinput(buf[i] == '\r' ? '\n' : (char)buf[i]);

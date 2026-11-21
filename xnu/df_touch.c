@@ -735,7 +735,10 @@ dft_thread(void *arg __unused, int wait __unused)
 		int req = df_touch_test_req;
 		if (req) {
 			df_touch_test_req = 0;
-			if (req == 3) {
+			if (req == 4) {
+				extern void df_mali_probe(void);
+				df_mali_probe();
+			} else if (req == 3) {
 				printf("touch: status ft_ok=%d irq=%d\n", ft_ok, dft_gpio_get_in(DFT_GPIO_IRQ));
 				if (!ft_ok) {
 					ft_ok = (dft_fts_boot() == 0);

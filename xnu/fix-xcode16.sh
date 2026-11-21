@@ -1559,6 +1559,40 @@ perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x
 grep -q 'fire launchd exit' "$exit_c" || { echo "fix-xcode16: kern_exit patch missing"; exit 1; }
 perl -0pi -e 's@(\nproc_prepareexit\(proc_t p, int rv, boolean_t perf_notify\)\n\{\n)@$1\t{ os_reason_t df_r = p->p_exit_reason; printf("DF_EXIT %s[%d] rv=0x%x sig=%d ns=%u code=0x%llx\\n", proc_best_name(p), proc_getpid(p), rv, WIFSIGNALED(rv) ? WTERMSIG(rv) : 0, df_r ? df_r->osr_namespace : 0, df_r ? (unsigned long long)df_r->osr_code : 0ULL); } /* fix-xcode16 df_exit */\n@' "$exit_c"
 grep -q 'df_exit \*/' "$exit_c" || { echo "fix-xcode16: df_exit patch missing"; exit 1; }
+perl -0pi -e 's@(\} /\* fix-xcode16 df_exit \*/\n)@$1\tif (WIFSIGNALED(rv) \&\& (WTERMSIG(rv) == 4 || WTERMSIG(rv) == 5 || WTERMSIG(rv) == 10 || WTERMSIG(rv) == 11)) { extern void df_user_bt(void); df_user_bt(); } /* fix-xcode16 df_user_bt */\n@' "$exit_c"
+grep -q 'df_user_bt \*/' "$exit_c" || { echo "fix-xcode16: df_user_bt hook missing"; exit 1; }
+cat >> "$src/bsd/dev/arm/systemcalls.c" <<'DFEOF'
+
+/* fix-xcode16: dump faulting user thread state at signal death (SIGTRAP/SEGV/BUS/ILL) */
+extern struct arm_saved_state *find_user_regs(thread_t);
+void df_user_bt(void);
+void
+df_user_bt(void)
+{
+	struct arm_saved_state *st = find_user_regs(current_thread());
+	if (!st) {
+		return;
+	}
+	uint64_t pc = get_saved_state_pc(st), lr = get_saved_state_lr(st);
+	uint64_t fp = saved_state64(st)->fp;
+	uint32_t insn = 0;
+	(void)copyin((user_addr_t)pc, &insn, 4);
+	printf("DF_BT pc=0x%llx lr=0x%llx fp=0x%llx insn=0x%08x x0=0x%llx x1=0x%llx\n",
+	    (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)fp, insn,
+	    (unsigned long long)saved_state64(st)->x[0], (unsigned long long)saved_state64(st)->x[1]);
+	for (int i = 0; i < 16 && fp > 0x100000 && !(fp & 7); i++) {
+		uint64_t fr[2] = { 0, 0 };
+		if (copyin((user_addr_t)fp, fr, 16) != 0) {
+			break;
+		}
+		printf("  DF_BT[%d] lr=0x%llx\n", i, (unsigned long long)fr[1]);
+		if (fr[0] <= fp) {
+			break;
+		}
+		fp = fr[0];
+	}
+}
+DFEOF
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
 perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"

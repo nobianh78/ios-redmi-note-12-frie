@@ -255,7 +255,8 @@ extern vm_offset_t ml_vtophys(vm_offset_t);
 extern uint64_t mach_absolute_time(void);
 
 /* one 16 KB kernel page, physically contiguous: L1 | L2 A | L2 B | jobs + results */
-static uint8_t dfm_mem[0x4000] __attribute__((aligned(0x4000)));
+static uint8_t dfm_mem[0x8000] __attribute__((aligned(0x4000)));
+static uint8_t dfm_heap[0x40000] __attribute__((aligned(0x1000)));   /* tiler heap */
 
 static void
 dfm_clean(const void *p, uint64_t len)
@@ -358,6 +359,140 @@ df_mali_hello(void)
 	    raw, dfm_r(dfm_gpu, JS1 + JS_STATUS), dfm_r(dfm_gpu, JS1 + JS_HEAD_LO), h[0],
 	    *result, *result == 0xCAFEBABE12345678ULL ? "GPU WROTE IT" : "no write", t1 - t0);
 	printf("mali: mmu raw 0x%x fault 0x%x addr 0x%x%08x\n", dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT),
+	    dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS), dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_HI),
+	    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
+	if (*result == 0xCAFEBABE12345678ULL) {
+		extern void df_mali_frag(void);
+		df_mali_frag();
+	}
+}
+
+/* ---------------- Phase 2b: fragment job clears the whole 1080x2400 framebuffer ---------------- */
+/* Descriptor layouts: Mesa src/panfrost/lib/genxml/v7.xml (Bifrost v7 = Mali-G52). */
+#define JS0               (0x1800 + 0 * 0x80)
+#define DFM_FB_PA         0x7ce6a000ULL
+#define DFM_FB_W          1080
+#define DFM_FB_H          2400
+
+static uint64_t dfm_l2_gb[3];
+static int dfm_l2_n;
+
+static void
+dfm_map_gb2(uint64_t base_pa, uint64_t pa_any)
+{
+	uint64_t gb = pa_any >> 30;
+	for (int i = 0; i < dfm_l2_n; i++) {
+		if (dfm_l2_gb[i] == gb) {
+			return;
+		}
+	}
+	if (dfm_l2_n >= 3) {
+		printf("mali: out of L2 tables for GB %llu\n", gb);
+		return;
+	}
+	int n = dfm_l2_n++;
+	dfm_l2_gb[n] = gb;
+	dfm_map_gb((uint64_t *)dfm_mem, (uint64_t *)(dfm_mem + 0x1000 * (n + 1)),
+	    base_pa + 0x1000 * (uint64_t)(n + 1), pa_any);
+}
+
+void df_mali_frag(void);
+void
+df_mali_frag(void)
+{
+	uint64_t base = ml_vtophys((vm_offset_t)dfm_mem);
+	uint64_t heap = ml_vtophys((vm_offset_t)dfm_heap);
+	printf("mali: frag: mem pa 0x%llx heap pa 0x%llx fb pa 0x%llx\n", base, heap, DFM_FB_PA);
+	for (unsigned i = 0; i < sizeof(dfm_mem); i++) {
+		dfm_mem[i] = 0;
+	}
+	dfm_l2_n = 0;
+	dfm_map_gb2(base, base);
+	dfm_map_gb2(base, heap);
+	dfm_map_gb2(base, DFM_FB_PA);
+
+	uint32_t *job = (uint32_t *)(dfm_mem + 0x4000);   /* fragment job: header 32 B + payload */
+	uint32_t *fbd = (uint32_t *)(dfm_mem + 0x4100);   /* params 64 B + padding 64 B + RT 64 B */
+	uint32_t *rt = fbd + 32;
+	uint32_t *tctx = (uint32_t *)(dfm_mem + 0x4400); /* tiler context, 192 B */
+	uint32_t *theap = (uint32_t *)(dfm_mem + 0x4600); /* tiler heap descriptor, 32 B */
+	uint16_t *sloc = (uint16_t *)(dfm_mem + 0x4700); /* sample locations */
+	uint64_t fbd_pa = base + 0x4100, tctx_pa = base + 0x4400, theap_pa = base + 0x4600;
+	uint64_t sloc_pa = base + 0x4700;
+
+	for (int i = 0; i < 64; i++) {
+		sloc[i] = 128;                      /* every sample at the pixel centre */
+	}
+
+	/* Tiler heap + context (empty polygon list: no draws, the fragment job only clears) */
+	theap[1] = sizeof(dfm_heap);
+	theap[2] = (uint32_t)heap;
+	theap[3] = (uint32_t)(heap >> 32);
+	theap[4] = (uint32_t)heap;
+	theap[5] = (uint32_t)(heap >> 32);
+	theap[6] = (uint32_t)(heap + sizeof(dfm_heap));
+	theap[7] = (uint32_t)((heap + sizeof(dfm_heap)) >> 32);
+	tctx[2] = 0x28;                         /* hierarchy mask */
+	tctx[3] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);
+	tctx[6] = (uint32_t)theap_pa;
+	tctx[7] = (uint32_t)(theap_pa >> 32);
+
+	/* Framebuffer Parameters */
+	fbd[4] = (uint32_t)sloc_pa;
+	fbd[5] = (uint32_t)(sloc_pa >> 32);
+	fbd[8] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);
+	fbd[9] = 0;                                                   /* bound min x/y */
+	fbd[10] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);  /* bound max x/y */
+	fbd[11] = (0u << 0)  /* 1 sample */ | (8u << 9) /* tile 256 px = 16x16 */ |
+	    (0u << 19) /* 1 RT */ | (1u << 24) /* 1 KB colour buffer per tile */;
+	fbd[14] = (uint32_t)tctx_pa;
+	fbd[15] = (uint32_t)(tctx_pa >> 32);
+
+	/* Render Target 0: RGBA8 tile buffer -> linear BGRA writeback straight into the LCD buffer */
+	rt[0] = (1u << 26);                                           /* internal format R8G8B8A8 */
+	rt[1] = (1u << 0) /* write enable */ | (19u << 3) /* R8G8B8A8 */ | (2u << 8) /* linear */ |
+	    ((2u | (1u << 3) | (0u << 6) | (3u << 9)) << 16);         /* swizzle B,G,R,A */
+	rt[8] = (uint32_t)DFM_FB_PA;
+	rt[9] = (uint32_t)(DFM_FB_PA >> 32);
+	rt[10] = DFM_FB_W * 4;                                         /* row stride */
+	rt[11] = DFM_FB_W * DFM_FB_H * 4;                              /* surface stride */
+	rt[12] = 0x20u | (0x80u << 8) | (0xFFu << 16) | (0xFFu << 24); /* clear R,G,B,A */
+
+	/* Fragment job */
+	job[4] = 1u | (9u << 1) | (1u << 16);                          /* 64b, FRAGMENT, index 1 */
+	job[8] = 0;                                                   /* bound min tile x/y */
+	job[9] = ((DFM_FB_W - 1) >> 4) | (((uint32_t)(DFM_FB_H - 1) >> 4) << 16);
+	uint64_t fbptr = fbd_pa | 1u;                                  /* MFBD, 1 RT, no ZS ext */
+	job[10] = (uint32_t)fbptr;
+	job[11] = (uint32_t)(fbptr >> 32);
+	dfm_clean(dfm_mem, sizeof(dfm_mem));
+
+	dfm_as_cmd(1 /* UPDATE: reload AS0 config, drop stale TLB entries */);
+	dfm_w(dfm_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	dfm_w(dfm_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+	uint64_t job_pa = base + 0x4000;
+	uint64_t t0 = mach_absolute_time();
+	dfm_w(dfm_gpu, JS0 + JS_HEAD_NEXT_LO, (uint32_t)job_pa);
+	dfm_w(dfm_gpu, JS0 + JS_HEAD_NEXT_HI, (uint32_t)(job_pa >> 32));
+	dfm_w(dfm_gpu, JS0 + JS_AFFINITY_NEXT_LO, 0x3);
+	dfm_w(dfm_gpu, JS0 + JS_AFFINITY_NEXT_HI, 0);
+	dfm_w(dfm_gpu, JS0 + JS_CONFIG_NEXT, 0u | (3u << 8) | (3u << 12) | (8u << 16));
+	dfm_w(dfm_gpu, JS0 + JS_COMMAND_NEXT, 1);
+	uint32_t raw = 0;
+	for (int i = 0; i < 50000; i++) {                             /* ~500 ms: JS0 DONE / FAIL */
+		raw = dfm_r(dfm_gpu, JOB_IRQ_RAWSTAT);
+		if (raw & ((1u << 0) | (1u << 16))) {
+			break;
+		}
+		dfm_udelay(10);
+	}
+	uint64_t t1 = mach_absolute_time();
+	dfm_clean(job, 64);
+	volatile uint32_t *fbv = (volatile uint32_t *)ml_io_map(DFM_FB_PA, 0x1000);
+	printf("mali: frag raw 0x%x js0 status 0x%x exc 0x%x fault 0x%x%08x | %llu ticks (%llu us) | fb[0]=0x%x\n",
+	    raw, dfm_r(dfm_gpu, JS0 + JS_STATUS), job[0], job[3], job[2], t1 - t0, (t1 - t0) / 13,
+	    fbv ? fbv[0] : 0);
+	printf("mali: frag mmu raw 0x%x fault 0x%x addr 0x%x%08x\n", dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT),
 	    dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS), dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_HI),
 	    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 }

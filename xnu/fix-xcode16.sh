@@ -1408,6 +1408,10 @@ grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC
 perl -0pi -e 's|(\t\t/\* shortcut: device IRQs are acked and dropped)|\t\tif (df_id == 1) { extern void df_smp_ipi(void); df_smp_ipi(); } /* fix-xcode16 df_smp */\n$1|' "$sleh_c"
 grep -q 'df_smp \*/' "$sleh_c" || { echo "fix-xcode16: SGI IPI dispatch not inserted"; exit 1; }
 cp "$(dirname "$0")/df_AppleARMSMP.cpp" "$src/iokit/Kernel/arm/AppleARMSMP.cpp"
+ai_c="$src/osfmk/arm/arm_init.c"
+perl -0pi -e 's|(\narm_init_cpu\(\n\tcpu_data_t      \*cpu_data_ptr\)\n\{\n)|$1\t{ extern volatile unsigned int df_sec_stage; df_sec_stage = 1; } /* df_smp stage */\n|' "$ai_c"
+perl -0pi -e 's|(\tcpu_machine_idle_init\(FALSE\);\n\n\tcpu_init\(\);\n)|$1\t{ extern volatile unsigned int df_sec_stage; df_sec_stage = 2; } /* df_smp stage */\n|' "$ai_c"
+[ "$(grep -c 'df_smp stage' "$ai_c")" = 2 ] || { echo "fix-xcode16: arm_init_cpu stage marks missing"; grep -n 'df_smp stage' "$ai_c"; exit 1; }
 cat >> "$src/pexpert/arm/pe_fiq.c" <<'DFEOF'
 
 #if HAS_GIC_V3

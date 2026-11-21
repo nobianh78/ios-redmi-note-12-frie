@@ -41,6 +41,7 @@ extern "C" void console_suspend();
 extern "C" void console_resume();
 extern "C" void df_gicr_enable_sgi(void);   /* pexpert/arm/pe_fiq.c (fix-xcode16) */
 extern "C" void df_smp_ipi(void);
+extern "C" uint64_t mach_absolute_time(void);
 
 #define DF_IPI_SGI       1u
 #define PSCI_CPU_ON_64   0xC4000003ULL
@@ -49,6 +50,8 @@ static const ml_topology_info *topology_info;
 static unsigned int boot_cpu;
 static processor_t *machProcessors;
 static ipi_handler_t df_ipi_handler;
+/* Secondary bring-up breadcrumbs: 1 arm_init_cpu entry, 2 after cpu_init, 3 PE_cpu_machine_init, 4 IPI ok */
+extern "C" { volatile unsigned int df_sec_stage; }
 static unsigned int df_max_cpus = 2;   /* raise to 6 once 2-core boot is stable */
 
 bool cluster_power_supported = false;
@@ -187,8 +190,24 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 		if (cpu_id != boot_cpu && cpu >= ncpu) {
 			continue;
 		}
+		df_sec_stage = 0;
 		if (processor_start(machProcessors[cpu_id]) != KERN_SUCCESS) {
 			panic("processor_start failed");
+		}
+		if (cpu_id != boot_cpu) {
+			uint64_t t0 = mach_absolute_time(), now, frq = 13000000;
+			unsigned int last = 0xffffffff;
+			do {
+				unsigned int st = df_sec_stage;
+				if (st != last) {
+					printf("df_smp: cpu %u stage %u\n", cpu_id, st);
+					last = st;
+				}
+				now = mach_absolute_time();
+			} while (last < 4 && now - t0 < 3 * frq);
+			if (last < 4) {
+				printf("df_smp: cpu %u STUCK at stage %u\n", cpu_id, last);
+			}
 		}
 	}
 	ml_cpu_init_completed();
@@ -247,6 +266,9 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 		IOCPURunPlatformActiveActions();
 	}
 
+	if (cpu_id != boot_cpu) {
+		df_sec_stage = 3;
+	}
 	df_gicr_enable_sgi();
 	ml_broadcast_cpu_event(CPU_BOOTED, cpu_id);
 
@@ -260,7 +282,7 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 		}
 	}
 	if (cpu_id != boot_cpu) {
-		printf("df_smp: cpu %u online\n", cpu_id);
+		df_sec_stage = 4;
 	}
 }
 

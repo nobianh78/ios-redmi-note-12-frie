@@ -105,12 +105,13 @@ def build_fire_adt() -> bytes:
     cpu0.add_property("timebase-frequency", u32(13_000_000))  # CNTFRQ_EL0 measured on the phone
     cpu0.add_property("clock-frequency", u32(2_000_000_000))
     cpus.add_child(cpu0)
-    # Secondary LITTLE cores (Cortex-A55, MPIDR aff1 = core number) brought up by df_AppleARMSMP.cpp
-    # through PSCI CPU_ON. The A75 cluster (cpu6/7) stays off until the A55-only SMP is stable.
-    for n in range(1, 6):
+    # Secondary cores brought up by df_AppleARMSMP.cpp through PSCI CPU_ON (MPIDR aff1 = core number):
+    # cpu1..5 Cortex-A55, cpu6..7 Cortex-A75, all in one DynamIQ DSU. No "cluster-type": VMAPPLE has
+    # MAX_CPU_CLUSTERS = 1, and a 'P' type would create a second cluster and trip an assert.
+    for n in range(1, 8):
         c = ADTNode(f"cpu{n}")
         c.add_property("device_type", cstr("cpu"))
-        c.add_property("compatible", cstr("arm,cortex-a55"))
+        c.add_property("compatible", cstr("arm,cortex-a75" if n >= 6 else "arm,cortex-a55"))
         c.add_property("reg", u32(n << 8))
         c.add_property("cpu-id", u32(n))
         c.add_property("state", cstr("waiting"))

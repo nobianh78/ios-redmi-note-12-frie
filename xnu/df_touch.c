@@ -75,12 +75,28 @@ static uint8_t dft_pkt_buf[1032];
 
 static inline uint32_t dft_spi_r(unsigned off) {
 	uint32_t v = dft_spi[off >> 2];
-	__asm__ volatile ("dsb ld" ::: "memory");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	return v;
 }
 static inline void dft_spi_w(unsigned off, uint32_t v) {
-	__asm__ volatile ("dsb st" ::: "memory");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	dft_spi[off >> 2] = v;
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static void
+dft_udelay(unsigned us)
+{
+	uint64_t frq = 0, t0 = 0, cur = 0;
+	__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(frq));
+	__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(t0));
+	uint64_t ticks = (frq / 1000000ULL) * (uint64_t)us;
+	if (ticks == 0) {
+		ticks = 26;
+	}
+	do {
+		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(cur));
+	} while ((cur - t0) < ticks);
 }
 
 static void
@@ -157,7 +173,9 @@ dft_hw_init(void)
 	dft_spi_w(SPI_CFG0_REG, (5u << 16) | 5u);        /* CS_SETUP=5, CS_HOLD=5 */
 	dft_spi_w(SPI_CFG1_REG, 5u);                     /* CS_IDLE=5 */
 	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_RST);
+	dft_udelay(10);
 	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE);
+	dft_udelay(10);
 	(void)dft_spi_r(SPI_STATUS0_REG);
 
 	printf("touch: clk cfg2 %x->%x cg2 %x->%x gpio_m3=%x irq=%d\n",
@@ -168,91 +186,96 @@ dft_hw_init(void)
 static void
 dft_spi_reset(void)
 {
-	uint32_t v = dft_spi_r(SPI_CMD_REG);
-	dft_spi_w(SPI_CMD_REG, v | SPI_CMD_RST);
-	(void)dft_spi_r(SPI_CMD_REG);
-	dft_spi_w(SPI_CMD_REG, (v & ~(SPI_CMD_RST | SPI_CMD_PAUSE_EN | SPI_CMD_ACT | SPI_CMD_RESUME)) | SPI_CMD_BASE);
-	(void)dft_spi_r(SPI_CMD_REG);
+	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_RST);
+	dft_udelay(10);
+	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE);
+	dft_udelay(10);
 	(void)dft_spi_r(SPI_STATUS0_REG);
 }
 
 /* Full-duplex polled single-shot FIFO PIO transfer on MT6768 SPI2.
- * Every FT8720 transfer is kept <= 32 bytes (0xAE chunks = 24B -> 31B wire,
- * touch read = 20B -> 29B wire for 3 fingers) so PAUSE_EN / RESUME is never
- * needed and every transfer completes in one hardware FIFO shot (FINISH_IF). */
+ * Matches stock Redmi 12 spi-mt65xx.c mtk_spi_fifo_transfer: NEVER pulse
+ * SPI_CMD_RST before normal transfers (26MHz CDC race swallows ACT).
+ * Every FT8720 transfer is kept <= 32 bytes (single FIFO shot, FINISH_IF). */
 static int
 dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 {
 	if (!dft_spi || len == 0 || len > 32) {
 		return -1;
 	}
-	/* Wait for SPI2 controller idle (STATUS1 bit 0 == 1) */
-	for (int w = 0; w < 100000; w++) {
-		if (dft_spi_r(SPI_STATUS1_REG) & 1u) {
-			break;
-		}
-	}
-	dft_spi_reset();
-
-	/* Program packet_len = len (bits 25:16), packet_loop = 1 (bits 15:8), cs_idle = 5 */
-	uint32_t cfg1 = ((len - 1u) << 16) | (0u << 8) | 5u;
-	dft_spi_w(SPI_CFG1_REG, cfg1);
-
-	/* Fill TX FIFO as 32-bit LE words */
 	uint32_t words = len >> 2;
-	for (uint32_t w = 0; w < words; w++) {
-		uint32_t v = (uint32_t)tx[w * 4] |
-		    ((uint32_t)tx[w * 4 + 1] << 8) |
-		    ((uint32_t)tx[w * 4 + 2] << 16) |
-		    ((uint32_t)tx[w * 4 + 3] << 24);
-		dft_spi_w(SPI_TX_DATA_REG, v);
-	}
-	if (len & 3u) {
-		uint32_t v = 0;
-		uint32_t base = words << 2;
-		for (uint32_t b = 0; b < (len & 3u); b++) {
-			v |= (uint32_t)tx[base + b] << (b * 8);
-		}
-		dft_spi_w(SPI_TX_DATA_REG, v);
-	}
+	uint32_t cfg1 = ((len - 1u) << 16) | (0u << 8) | 5u;
 
-	/* Single-shot trigger (no PAUSE_EN): ACT -> FINISH_IF -> CS auto-deassert */
-	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_ACT);
-
-	uint32_t st = 0;
-	for (int spin = 0; spin < 500000; spin++) {
-		st = dft_spi_r(SPI_STATUS0_REG);
-		if (st & 0x3u) {
-			break;
-		}
-	}
-	if (!(st & 0x3u)) {
-		printf("touch: spi timeout len=%u st0=%x st1=%x cmd=%x\n",
-		    len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));
-		dft_spi_reset();
-		return -2;
-	}
-
-	/* Drain RX FIFO as 32-bit LE words */
-	for (uint32_t w = 0; w < words; w++) {
-		uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
-		if (rx) {
-			rx[w * 4]     = (uint8_t)(v & 0xff);
-			rx[w * 4 + 1] = (uint8_t)((v >> 8) & 0xff);
-			rx[w * 4 + 2] = (uint8_t)((v >> 16) & 0xff);
-			rx[w * 4 + 3] = (uint8_t)((v >> 24) & 0xff);
-		}
-	}
-	if (len & 3u) {
-		uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
-		if (rx) {
-			uint32_t base = words << 2;
-			for (uint32_t b = 0; b < (len & 3u); b++) {
-				rx[base + b] = (uint8_t)((v >> (b * 8)) & 0xff);
+	for (int attempt = 0; attempt < 3; attempt++) {
+		/* Wait for SPI2 controller idle (STATUS1 bit 0 == 1) */
+		for (int w = 0; w < 50000; w++) {
+			if (dft_spi_r(SPI_STATUS1_REG) & 1u) {
+				break;
 			}
 		}
+		/* Clear any stale status flag */
+		(void)dft_spi_r(SPI_STATUS0_REG);
+
+		/* Program packet_len = len (bits 25:16), packet_loop = 1 (bits 15:8), cs_idle = 5 */
+		dft_spi_w(SPI_CFG1_REG, cfg1);
+
+		/* Fill TX FIFO as 32-bit LE words */
+		for (uint32_t w = 0; w < words; w++) {
+			uint32_t v = (uint32_t)tx[w * 4] |
+			    ((uint32_t)tx[w * 4 + 1] << 8) |
+			    ((uint32_t)tx[w * 4 + 2] << 16) |
+			    ((uint32_t)tx[w * 4 + 3] << 24);
+			dft_spi_w(SPI_TX_DATA_REG, v);
+		}
+		if (len & 3u) {
+			uint32_t v = 0;
+			uint32_t base = words << 2;
+			for (uint32_t b = 0; b < (len & 3u); b++) {
+				v |= (uint32_t)tx[base + b] << (b * 8);
+			}
+			dft_spi_w(SPI_TX_DATA_REG, v);
+		}
+
+		/* Single-shot trigger (no PAUSE_EN): ACT -> FINISH_IF -> CS auto-deassert */
+		uint32_t cur_cmd = dft_spi_r(SPI_CMD_REG) & ~(SPI_CMD_RST | SPI_CMD_PAUSE_EN | SPI_CMD_ACT | SPI_CMD_RESUME);
+		dft_spi_w(SPI_CMD_REG, cur_cmd | SPI_CMD_BASE | SPI_CMD_ACT);
+
+		uint32_t st = 0;
+		for (int spin = 0; spin < 50000; spin++) {
+			st = dft_spi_r(SPI_STATUS0_REG);
+			if (st & 0x3u) {
+				break;
+			}
+		}
+		if (!(st & 0x3u)) {
+			printf("touch: spi timeout try=%d len=%u st0=%x st1=%x cmd=%x\n",
+			    attempt, len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));
+			dft_spi_reset();
+			continue;
+		}
+
+		/* Drain RX FIFO as 32-bit LE words */
+		for (uint32_t w = 0; w < words; w++) {
+			uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
+			if (rx) {
+				rx[w * 4]     = (uint8_t)(v & 0xff);
+				rx[w * 4 + 1] = (uint8_t)((v >> 8) & 0xff);
+				rx[w * 4 + 2] = (uint8_t)((v >> 16) & 0xff);
+				rx[w * 4 + 3] = (uint8_t)((v >> 24) & 0xff);
+			}
+		}
+		if (len & 3u) {
+			uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
+			if (rx) {
+				uint32_t base = words << 2;
+				for (uint32_t b = 0; b < (len & 3u); b++) {
+					rx[base + b] = (uint8_t)((v >> (b * 8)) & 0xff);
+				}
+			}
+		}
+		return 0;
 	}
-	return 0;
+	return -2;
 }
 
 /* FocalTech V3.4 SPI protocol (verified against Redmi 12 fire_linux_Image):
@@ -447,15 +470,23 @@ dft_fts_boot(void)
 
 	/* Section 1: PRAM App (64,884 bytes -> 0x000000) */
 	int rc = dft_fts_write_section(df_ft8720_fw, DF_FT8720_APP_LEN, 0x000000);
-	if (rc || (rc = dft_fts_ecc_check(df_ft8720_fw, DF_FT8720_APP_LEN))) {
+	if (rc == 0) {
+		printf("touch: App uploaded (%uB), verifying ECC...\n", DF_FT8720_APP_LEN);
+		rc = dft_fts_ecc_check(df_ft8720_fw, DF_FT8720_APP_LEN);
+	}
+	if (rc) {
 		printf("touch: FT8720 App upload/ECC failed (%d)\n", rc);
 		return rc;
 	}
 	/* Section 2: Initcode/DRAM (4,704 bytes -> 0xD00000) */
 	rc = dft_fts_write_section(df_ft8720_fw + DF_FT8720_APP_LEN,
 	    DF_FT8720_INIT_LEN, 0xD00000);
-	if (rc || (rc = dft_fts_ecc_check(df_ft8720_fw + DF_FT8720_APP_LEN,
-	    DF_FT8720_INIT_LEN))) {
+	if (rc == 0) {
+		printf("touch: Initcode uploaded (%uB), verifying ECC...\n", DF_FT8720_INIT_LEN);
+		rc = dft_fts_ecc_check(df_ft8720_fw + DF_FT8720_APP_LEN,
+		    DF_FT8720_INIT_LEN);
+	}
+	if (rc) {
 		printf("touch: FT8720 Initcode upload/ECC failed (%d)\n", rc);
 		return rc;
 	}

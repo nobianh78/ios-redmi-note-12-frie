@@ -696,6 +696,24 @@ static void
 dft_thread(void *arg __unused, int wait __unused)
 {
 	IOSleep(2000); /* wait for COM6 USB console to come up so init logs are visible */
+	{
+		/* Measure real CPU clock: PMU cycle counter vs CNTVCT over ~50 ms */
+		uint64_t midr, mpidr, frq, t0, t1, c0, c1, pmcr;
+		__asm__ volatile ("mrs %0, MIDR_EL1" : "=r"(midr));
+		__asm__ volatile ("mrs %0, MPIDR_EL1" : "=r"(mpidr));
+		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(frq));
+		__asm__ volatile ("mrs %0, PMCR_EL0" : "=r"(pmcr));
+		__asm__ volatile ("msr PMCR_EL0, %0; isb" :: "r"(pmcr | 1u));
+		__asm__ volatile ("msr PMCNTENSET_EL0, %0; isb" :: "r"(1ull << 31));
+		__asm__ volatile ("isb; mrs %0, CNTVCT_EL0" : "=r"(t0));
+		__asm__ volatile ("mrs %0, PMCCNTR_EL0" : "=r"(c0));
+		do {
+			__asm__ volatile ("isb; mrs %0, CNTVCT_EL0" : "=r"(t1));
+		} while (t1 - t0 < frq / 20);
+		__asm__ volatile ("mrs %0, PMCCNTR_EL0" : "=r"(c1));
+		printf("cpu: midr=0x%llx mpidr=0x%llx cntfrq=%llu pmcr=0x%llx clock=%llu MHz\n",
+		    midr, mpidr, frq, pmcr, ((c1 - c0) * frq / (t1 - t0)) / 1000000ULL);
+	}
 	dft_hw_init();
 	int ft_ok = (dft_fts_boot() == 0);
 	int idle_polls = 0;

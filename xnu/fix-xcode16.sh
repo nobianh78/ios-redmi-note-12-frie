@@ -550,7 +550,9 @@ df_cons_write(const char *s, int n)
 	if (df_wdt) {
 		df_wdt[0x08 / 4] = 0x1971;   /* WDT_RST reload */
 	}
-	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	if (((uintptr_t)fb >> 48) == 0) {
+		__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	}
 	for (int i = 0; i < n; i++) {
 		char c = s[i];
 		df_ps_put(c);
@@ -630,17 +632,6 @@ df_irq_stat(uint32_t id)
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
 	extern int df_gui_active;
-	if ((id == 27 || id == 30) && df_fbva) {
-		static uint32_t df_hb_tick;
-		if ((++df_hb_tick % 10) == 0) {
-			uint32_t col = (df_hb_tick & 16) ? 0xff00ff00u : 0xff0000ffu;
-			for (unsigned y = 60; y < 76; y++) {
-				volatile uint32_t *row = &df_fbva[y * (4320 / 4)];
-				for (unsigned x = 0; x < 16; x++) row[x] = col;
-				__asm__ volatile ("dc civac, %0" :: "r"(row) : "memory");
-			}
-		}
-	}
 	if ((id == 27 || id == 30) && df_cons_last) {   /* hang report: where the interrupted CPU was, every 8 s of silence */
 		uint64_t df_now, df_frq;
 		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
@@ -727,6 +718,9 @@ df_irq_stat(uint32_t id)
 	}
 	int32_t stval = (int32_t)(uint32_t)tval;   /* signed: negative = already expired */
 	(void)stval; (void)ctl;
+	if (df_gui_active || id == 0xffffffffu || (df_irq_count & 127) != 1 || !df_fbva) {
+		return;   /* keep GUI clean and avoid per-IRQ LCD/TLB overhead */
+	}
 	extern uint32_t df_wq_cnt[5];
 	uint64_t val[6] = { df_irq_count, df_wq_cnt[0], df_wq_cnt[1], df_wq_cnt[2], df_wq_cnt[3], df_wq_cnt[4] };
 	for (int k = 0; k < 6; k++) {
@@ -743,7 +737,9 @@ df_irq_stat(uint32_t id)
 	}
 	volatile uint32_t *fb = df_fbva;
 	const unsigned pitch = 4320 / 4, y0 = 50;   /* right above the full-height log (top = 60) */
-	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	if (((uintptr_t)fb >> 48) == 0) {
+		__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
+	}
 	for (int fy = 0; fy < 8; fy++) {
 		volatile uint32_t *row = &fb[(y0 + fy) * pitch];
 		for (unsigned x = 0; x < 1080; x++) {
@@ -759,12 +755,16 @@ df_irq_stat(uint32_t id)
 }
 EOF
 cp "$(dirname "$0")/font8x8.h" "$src/osfmk/arm64/df_font8x8.h"
+cp "$(dirname "$0")/df_ft8720_fw.h" "$src/osfmk/arm64/df_ft8720_fw.h"
 #        USB CDC-ACM console on USB0 (polled MUSB device): kernel log + /dev/console over a PC COM port.
 cat "$(dirname "$0")/df_usb.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
 grep -q '^df_usb_start(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_usb.c not appended"; exit 1; }
 #        P5: read-only eMMC (MSDC0 PIO); prints the GPT at boot.
 cat "$(dirname "$0")/df_emmc.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
 grep -q '^df_emmc_probe(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_emmc.c not appended"; exit 1; }
+#        P8: FocalTech FT8720 touchscreen over MT6768 SPI2 -> Apple IOHIDEventService.
+cat "$(dirname "$0")/df_touch.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
+grep -q '^df_touch_start(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_touch.c not appended"; exit 1; }
 cat "$(dirname "$0")/df_emmc_dev.c" >> "$src/bsd/dev/memdev.c"
 grep -q '^df_emmc_devinit(void)' "$src/bsd/dev/memdev.c" || { echo "fix-xcode16: df_emmc_dev.c not appended"; exit 1; }
 #        P6: HFS+ root straight from the eMMC "super" partition (read-only block device, df_emmc_dev.c).
@@ -1167,6 +1167,8 @@ perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n
 perl -0pi -e 's|^|extern "C" void ml_set_max_cpus(unsigned int); /* fix-xcode16 */\n|' "$pe_cpp"
 perl -0pi -e 's|^|extern "C" void df_mfb_attach(class IOService *); /* fix-xcode16 P6 */\n|' "$pe_cpp"
 cat "$(dirname "$0")/df_mfb.cpp" >> "$pe_cpp"
+cat "$(dirname "$0")/df_hid.cpp" >> "$pe_cpp"
+grep -q 'df_hid_attach(IOService' "$pe_cpp" || { echo "fix-xcode16: df_hid.cpp not appended"; exit 1; }
 #        P6: log matching dictionaries backboardd asks IOKit for
 perl -0pi -e 's/(\nIOService::getMatchingServices\(\s*OSDictionary\s*\*\s*matching\s*\)\s*\{\n)/$1\tdf_match_log("get", matching); \/\* fix-xcode16 P6 \*\/\n/; s/(\nIOService::copyMatchingService\(\s*OSDictionary\s*\*\s*matching\s*\)\s*\{\n)/$1\tdf_match_log("copy", matching); \/\* fix-xcode16 P6 \*\/\n/; s/(\nIOService::addMatchingNotification\(\s*const OSSymbol\s*\*\s*type,\s*OSDictionary\s*\*\s*matching,[^{;]*?SInt32\s+priority\s*\)\s*\{\n)/$1\tdf_match_log("notify", matching); \/\* fix-xcode16 P6 \*\/\n/g; s/^/extern "C" void df_match_log(const char *, class OSDictionary *); \/\* fix-xcode16 P6 \*\/\n/' "$src/iokit/Kernel/IOService.cpp"
 grep -c 'df_match_log("' "$src/iokit/Kernel/IOService.cpp" | grep -qv '^0$' || { echo "fix-xcode16: df_match_log hooks missing"; grep -n -A2 '^IOService::getMatchingServices\|^IOService::copyMatchingService\|^IOService::addMatchingNotification' "$src/iokit/Kernel/IOService.cpp"; exit 1; }
@@ -1421,7 +1423,7 @@ exec_c="$src/bsd/kern/kern_exec.c"
 #        branches, and the first attempt hooked one that does not run.
 perl -0pi -e 's|(\nload_init_program\(proc_t p\)\n\{\n)|$1\t{ extern void df_usb_start(void); df_usb_start(); } /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'df_usb_start(); } /\* fix-xcode16' "$exec_c" || { echo "fix-xcode16: df_usb_start hook missing"; exit 1; }
-perl -0pi -e 's|(df_usb_start\(\); \} /\* fix-xcode16 \*/\n)|$1\t{ extern void df_emmc_probe(void); df_emmc_probe(); } /* fix-xcode16 P5 */\n\t{ extern void df_emmc_devinit(void); df_emmc_devinit(); }\n|' "$exec_c"
+perl -0pi -e 's|(df_usb_start\(\); \} /\* fix-xcode16 \*/\n)|$1\t{ extern void df_emmc_probe(void); df_emmc_probe(); } /* fix-xcode16 P5 */\n\t{ extern void df_emmc_devinit(void); df_emmc_devinit(); }\n\t{ extern void df_touch_start(void); df_touch_start(); } /* fix-xcode16 P8 */\n|' "$exec_c"
 grep -q 'df_emmc_probe(); } /\* fix-xcode16 P5' "$exec_c" || { echo "fix-xcode16: df_emmc_probe hook missing"; exit 1; }
 perl -0pi -e 's|(\t\t\terror = load_init_program_at_path\(p, \(user_addr_t\)scratch_addr, "/sbin/launchd"\);\n)|$1\t\t\tprintf("fire [P7-FSCTL]: /sbin/launchd execve -> %d\\n", error); /* fix-xcode16 */\n|' "$exec_c"
 grep -q 'fire \[P7-FSCTL\]:' "$exec_c" || { echo "fix-xcode16: execve result log not inserted"; exit 1; }
@@ -1551,7 +1553,7 @@ perl -0pi -e 's{(kret = pthread_functions->workq_create_threadstack\(p, vmap, &t
 perl -0pi -e 's{(kret = thread_create_workq_waiting\(proc_task\(p\), workq_unpark_continue, &th\);\n\tif \(kret != KERN_SUCCESS\) \{\n)}{$1\t\tprintf("fire wq thcreate fail %d pid %d\\n", kret, proc_getpid(p)); if (proc_getpid(p) == 1) DF_WQ(3);\n}' "$wq_c"
 perl -0pi -e 's{(\n\tWQ_TRACE_WQ\(TRACE_wq_thread_create \| DBG_FUNC_NONE, wq, 0, 0, 0\);\n)}{$1\tif (proc_getpid(p) == 1) { printf("fire wq new thread n %d\\n", wq->wq_nthreads); DF_WQ(2); }\n}' "$wq_c"
 perl -0pi -e 's{(\nworkq_setup_and_run\(proc_t p, struct uthread \*uth, int setup_flags\)\n\{\n)}{$1\t{ static int df_r; if (0 \&\& proc_getpid(p) == 1 \&\& df_r++ < 40) printf("fire wq run t%x sf %x\\n", (unsigned)(((uintptr_t)uth >> 4) \& 0xffff), setup_flags); if (proc_getpid(p) == 1) DF_WQ(4); } /* fix-xcode16 wq */\n}' "$wq_c"
-perl -0pi -e 's{\A}{extern unsigned int df_wq_cnt[5]; extern void df_irq_stat(unsigned int);\n#define DF_WQ(k) do { df_wq_cnt[k]++; df_irq_stat(0xffffffffu); } while (0) /* fix-xcode16: counters on the yellow status line */\n}' "$wq_c"
+perl -0pi -e 's{\A}{extern unsigned int df_wq_cnt[5];\n#define DF_WQ(k) do { df_wq_cnt[k]++; } while (0) /* fix-xcode16: lightweight counters */\n}' "$wq_c"
 for m in 'DF_WQ(4)' 'fire wq sc rq' 'no req admitted' 'wq stack fail' 'thcreate fail' 'wq new thread' 'fire wq run'; do grep -q "$m" "$wq_c" || { echo "fix-xcode16: wq trace '$m' not inserted"; exit 1; }; done
 #        kern_exit.c: trace launchd exit details
 exit_c="$src/bsd/kern/kern_exit.c"

@@ -396,6 +396,12 @@ dfu_bulk(int in_irq)
 					if (df_wdt) {
 						df_wdt[0x14 / 4] = 0x1209;
 					}
+					continue;
+				}
+				if (buf[i] == 0x14 || buf[i] == 0x19 || buf[i] == 0x07) {
+					extern volatile int df_touch_test_req;
+					df_touch_test_req = (buf[i] == 0x14) ? 1 : (buf[i] == 0x19 ? 2 : 3);
+					continue;
 				}
 				cons_cinput(buf[i] == '\r' ? '\n' : (char)buf[i]);
 			}

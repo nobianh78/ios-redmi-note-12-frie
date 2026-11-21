@@ -36,9 +36,6 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 #define DF_L0_H 2460
 
 static mach_vm_address_t g_user_fb_addr = 0;
-static volatile int df_after50 = 0; /* trace everything after mfb sel 50 (GUI hang hunt) */
-static volatile uint32_t df_seq = 0;
-#define DF_T(...) do { if (df_after50 && df_seq < 3000) { printf("T%u ", df_seq++); printf(__VA_ARGS__); } } while (0)
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
 static uint32_t *g_sw_fb_kva = NULL;
 static volatile uint32_t *df_l0va = NULL;
@@ -348,7 +345,7 @@ bool DFMobileFramebufferUC::start(IOService *provider) {
         this, &DFMobileFramebufferUC::vsyncTimerAction);
     if (fVsyncTimer) {
       fWL->addEventSource(fVsyncTimer);
-      fVsyncTimer->setTimeoutMS(250);
+      fVsyncTimer->setTimeoutMS(50);
     }
   }
   return true;
@@ -381,7 +378,6 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
   }
   uc->fVsyncCount++;
-  DF_T("vsync tick %llu\n", (unsigned long long)uc->fVsyncCount);
   uint64_t now = 0;
   clock_get_uptime(&now);
   for (int i = 0; i < 4; i++) {
@@ -389,7 +385,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
       io_user_reference_t args[2] = { (io_user_reference_t)now,
                                       (io_user_reference_t)uc->fVsyncCount };
       IOReturn r = sendAsyncResult64(uc->fAsync[i].ref, kIOReturnSuccess, args, 2);
-      if (uc->fVsyncCount <= 5) {
+      if (uc->fVsyncCount <= 3) {
         printf("mfb: vsync #%llu sel=%u sendAsync -> 0x%x\n",
                (unsigned long long)uc->fVsyncCount, uc->fAsync[i].selector, r);
       }
@@ -405,15 +401,13 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     msg.msgh_local_port = MACH_PORT_NULL;
     msg.msgh_voucher_port = 0;
     msg.msgh_id = 0;
-    DF_T("vsync notify send\n");
     mach_msg_return_t mr = mach_msg_send_from_kernel_proper(&msg, sizeof(msg));
-    DF_T("vsync notify sent 0x%x\n", (unsigned)mr);
-    if (++s_notify_cnt <= 5) {
+    if (++s_notify_cnt <= 3) {
       printf("mfb: notify type=3 #%u -> 0x%x\n", s_notify_cnt, (unsigned)mr);
     }
   }
   if (sender) {
-    sender->setTimeoutMS(250);
+    sender->setTimeoutMS(50);
   }
 }
 
@@ -430,11 +424,7 @@ IOReturn DFMobileFramebufferUC::registerNotificationPort(
 IOReturn DFMobileFramebufferUC::externalMethod(
     uint32_t selector, IOExternalMethodArguments *a,
     IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) {
-  if (selector == 50) {
-    df_after50 = 1;
-  }
-  DF_T("mfb> sel %u pid %d\n", selector, proc_selfpid());
-  if (df_mfb_logs++ < 400) {
+  if (df_mfb_logs++ < 60) {
     printf("mfb sel %u pid %d in %u/%u out %u/%u async=%d\n", selector,
            proc_selfpid(), a->scalarInputCount, a->structureInputSize,
            a->scalarOutputCount, a->structureOutputSize,
@@ -569,29 +559,15 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     if (a->structureInput && a->structureInputSize >= 0x60) {
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
-      if (s_swap_cnt <= 40) {
+      if (s_swap_cnt <= 15) {
         printf("mfb: SwapEnd #%u sid=%u nz=%u nb=%u [0]=0x%x [mid]=0x%x\n",
                s_swap_cnt, s0, nonzero, nonblack,
                g_sw_fb_kva ? g_sw_fb_kva[0] : 0,
                g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
-    DF_T("mfb SwapEnd blit done, flushing\n");
-    df_flush_fb();
-    DF_T("mfb SwapEnd flushed\n");
-  }
-  if (selector == 6) {
-    DF_T("mfb SwapWait blit\n");
-    /* SwapWait */
-    if (g_sw_fb_kva && df_fbva) {
-      size_t n = (size_t)DF_MFB_W * DF_MFB_H;
-      for (size_t i = 0; i < n; i++) {
-        df_fbva[i] = g_sw_fb_kva[i] | 0xff000000U;
-      }
-    }
     df_flush_fb();
   }
-  DF_T("mfb< sel %u\n", selector);
   return kIOReturnSuccess;
 }
 
@@ -680,8 +656,7 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
                                          IOExternalMethodArguments *a,
                                          IOExternalMethodDispatch *dispatch,
                                          OSObject *target, void *reference) {
-  DF_T("ios> sel %u pid %d\n", selector, proc_selfpid());
-  if (df_ios_logs++ < 400) {
+  if (df_ios_logs++ < 40) {
     printf("ios sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
            a->scalarInputCount, a->structureInputSize, a->scalarOutputCount,
            a->structureOutputSize);
@@ -886,6 +861,8 @@ extern "C" void df_path_log(const char *path) {
   }
 }
 
+extern "C" void df_hid_attach(IOService *provider);
+
 extern "C" void df_mfb_attach(IOService *provider) {
   IOCoreSurfaceRoot *sr = OSTypeAlloc(IOCoreSurfaceRoot);
   if (sr && sr->init() && sr->attach(provider) && sr->start(provider)) {
@@ -912,4 +889,5 @@ extern "C" void df_mfb_attach(IOService *provider) {
       acc->release();
     }
   }
+  df_hid_attach(provider);
 }

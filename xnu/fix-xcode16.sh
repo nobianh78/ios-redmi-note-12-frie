@@ -1458,7 +1458,7 @@ perl -0pi -e 's@(IOReturn\nIOPMrootDomain::sleepSystemOptions\([^)]*\)\n\{)@$1\n
 #        P6 GUI hang (2): the 10 ms cap did not help: the core never wakes from cpu_idle's WFI once the
 #        system goes fully idle (MT6768 MCDI likely powers the core down; CNTV is no wake source). Spin on
 #        ISR_EL1 (pending IRQ/FIQ, visible even while masked) instead of WFI.
-perl -0pi -e 's/__builtin_arm_wfi\(\);/{ while (!(__builtin_arm_rsr64("ISR_EL1") \& 0xc0)) { } } \/\* fix-xcode16 P6: no WFI \*\//g' "$src/osfmk/arm64/cpu.c"
+perl -0pi -e 's/__builtin_arm_wfi\(\);/{ for (volatile int _w = 0; _w < 5000 \&\& !(__builtin_arm_rsr64("ISR_EL1") \& 0xc0); _w++) { } } \/\* fix-xcode16 P6: no WFI \*\//g' "$src/osfmk/arm64/cpu.c"
 grep -q 'fix-xcode16 P6: no WFI' "$src/osfmk/arm64/cpu.c" || { echo "fix-xcode16: cpu_idle WFI not replaced"; grep -n -B2 -A2 'wfi' "$src/osfmk/arm64/cpu.c" | head -40; exit 1; }
 echo "fix-xcode16: cpu.c WFI -> ISR spin: $(grep -c 'fix-xcode16 P6: no WFI' "$src/osfmk/arm64/cpu.c")"
 #        P6 GUI hang: CPU sleeps in machine_idle WFI and the timer IRQ never comes back. Cap every

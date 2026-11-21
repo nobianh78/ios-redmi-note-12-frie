@@ -123,6 +123,8 @@ def main():
         (0x1ae3df468, struct.pack('<II', 0x52800060, 0xd65f03c0), 'MKBGetDeviceLockState -> return 3 (kMobileLockStateDisabled)'),
     # FBS identityForProcessIdentity: nil processIdentity -> return nil instead of brk (SB unlock crash)
     (0x19b916914, struct.pack('<II', 0xd2800014, 0x17fffff9), 'FBS identityForProcessIdentity: nil -> return nil (no brk)'),
+    # SBSceneManager.m:1002 NSAssert(application) -> return nil sceneHandle (x24=0, x21=0, jump to release/epilogue)
+    (0x1c5915468, struct.pack('<III', 0xd2800018, 0xd2800015, 0x17ffffd3), 'SBSceneManager nil application -> return nil (no NSAssert)'),
         (0x1ae3e7024, struct.pack('<II', 0x52800060, 0xd65f03c0), 'MKBGetDeviceLockStateIndirect -> return 3 (kMobileLockStateDisabled)'),
         (0x1ae3df824, struct.pack('<II', 0x52800020, 0xd65f03c0), 'MKBDeviceUnlockedSinceBoot -> return 1'),
         (0x1ae3dfb0c, struct.pack('<II', 0x52800020, 0xd65f03c0), 'MKBUserUnlockedSinceBoot -> return 1'),

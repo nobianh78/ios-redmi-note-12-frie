@@ -1166,7 +1166,8 @@ perl -0pi -e 's|^|extern "C" void df_mfb_attach(class IOService *); /* fix-xcode
 cp "$(dirname "$0")/df_apple_logo.h" "$src/iokit/Kernel/df_apple_logo.h"
 cat "$(dirname "$0")/df_mfb.cpp" >> "$pe_cpp"
 cp "$(dirname "$0")/df_wallpaper.bin" "$src/iokit/Kernel/df_wallpaper.bin"
-perl -pi -e "s|\@DF_WALL_PATH\@|$src/iokit/Kernel/df_wallpaper.bin|g" "$pe_cpp"
+df_wall_abs="$(cd "$src/iokit/Kernel" && pwd)/df_wallpaper.bin"
+perl -pi -e "s|\@DF_WALL_PATH\@|$df_wall_abs|g" "$pe_cpp"
 grep -q 'df_wallpaper.bin' "$pe_cpp" && ! grep -q '@DF_WALL_PATH@' "$pe_cpp" || { echo "fix-xcode16: wallpaper path not set"; exit 1; }
 cat "$(dirname "$0")/df_hid.cpp" >> "$pe_cpp"
 grep -q 'df_hid_attach(IOService' "$pe_cpp" || { echo "fix-xcode16: df_hid.cpp not appended"; exit 1; }

@@ -351,8 +351,27 @@ dfe_ov_io(uint64_t blk, uint32_t nsec, uint8_t *va, int write)
 			memcpy(pg + off * 512, va, n * 512);
 		} else if (pg) {
 			memcpy(va, pg + off * 512, n * 512);
-		} else if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), n, va)) {
-			return EIO;
+		} else {
+			/* Coalesce consecutive non-overlay pages into a single DMA read (up to 64 KB) */
+			uint32_t run = n;
+			while (run < nsec && run < 128) {
+				uint64_t next_blk = blk + run;
+				if (dfe_ov_find(next_blk >> 3, 0)) {
+					break;
+				}
+				uint32_t add = 8 - (uint32_t)(next_blk & 7);
+				if (run + add > nsec) {
+					add = nsec - run;
+				}
+				if (run + add > 128) {
+					add = 128 - run;
+				}
+				run += add;
+			}
+			if (df_emmc_readn((uint32_t)(df_emmc_super_lba + blk), run, va)) {
+				return EIO;
+			}
+			n = run;
 		}
 		blk += n;
 		nsec -= n;

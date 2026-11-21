@@ -39,12 +39,10 @@ static inline void dfe_w(unsigned o, uint32_t v) { *(volatile uint32_t *)(dfe + 
 static uint32_t
 dfe_wait(uint32_t bits, int ms)
 {
-	for (int i = 0; i < ms * 100; i++) {
+	for (int i = 0; i < ms * 10000; i++) {
 		uint32_t v = dfe_r(E_INT);
 		if (v & bits) {
 			return v;
-		}
-		for (volatile int d = 0; d < 1000; d++) {
 		}
 	}
 	return 0;
@@ -273,7 +271,7 @@ dfe_dma_init(uint32_t bench_lba)
 		printf("emmc: DMA benchmark failed %d, staying on PIO\n", rc);
 		return;
 	}
-	dfe_dma_ok = 0;   /* TEST: PIO only - random objc/shared-cache corruption under DMA? */
+	dfe_dma_ok = 1;
 	printf("emmc: DMA on (rst %d, buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
 	    dfe_dma_rst, dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
 }

@@ -117,6 +117,26 @@ df_usb_putc(char c)
 	}
 	dfu_ring[dfu_head] = c;
 	dfu_head = n;
+	if (!s && dfu && dfu_configured && !dfu_in_poll && c == '\n') {
+		/* IRQs disabled (e.g. kernel panic): flush TX ring directly over EP1 IN so COM6 sees the panic */
+		dfu_in_poll = 1;
+		unsigned maxp = dfu_hs ? 512 : 64;
+		for (int tries = 0; tries < 50000 && dfu_tail != dfu_head; tries++) {
+			dfu_w8(M_INDEX, 1);
+			uint16_t tx = dfu_r16(M_CSR0);
+			if (!(tx & TXCSR_TXPKTRDY)) {
+				unsigned k = 0;
+				while (k < maxp && dfu_tail != dfu_head) {
+					dfu_w8(M_FIFO(1), (uint8_t)dfu_ring[dfu_tail]);
+					dfu_tail = (dfu_tail + 1) % DFU_RING;
+					k++;
+				}
+				dfu_w16(M_CSR0, (uint16_t)(tx | TXCSR_TXPKTRDY));
+			}
+		}
+		dfu_w8(M_INDEX, 0);
+		dfu_in_poll = 0;
+	}
 	ml_set_interrupts_enabled(s);
 }
 

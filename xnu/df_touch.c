@@ -165,6 +165,17 @@ dft_hw_init(void)
 	    dft_gpio[0x330 >> 2], dft_gpio_get_in(DFT_GPIO_IRQ));
 }
 
+static void
+dft_spi_reset(void)
+{
+	uint32_t v = dft_spi_r(SPI_CMD_REG);
+	dft_spi_w(SPI_CMD_REG, v | SPI_CMD_RST);
+	(void)dft_spi_r(SPI_CMD_REG);
+	dft_spi_w(SPI_CMD_REG, (v & ~(SPI_CMD_RST | SPI_CMD_PAUSE_EN | SPI_CMD_ACT | SPI_CMD_RESUME)) | SPI_CMD_BASE);
+	(void)dft_spi_r(SPI_CMD_REG);
+	(void)dft_spi_r(SPI_STATUS0_REG);
+}
+
 /* Full-duplex polled FIFO PIO transfer on MT6768 SPI2 (32-byte hardware FIFO,
  * pause-mode keeps CS asserted across chunks > 32 bytes, matching spi-mt65xx.c). */
 static int
@@ -173,11 +184,19 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 	if (!dft_spi || len == 0) {
 		return -1;
 	}
-	uint32_t cmd = SPI_CMD_BASE | SPI_CMD_PAUSE_EN;
-	/* Soft reset + clear pending status */
-	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_RST);
+	/* Wait for SPI2 controller idle (STATUS1 bit 0 == 1) */
+	for (int w = 0; w < 100000; w++) {
+		if (dft_spi_r(SPI_STATUS1_REG) & 1u) {
+			break;
+		}
+	}
+	/* Clean soft reset with readback barriers (matches mtk_spi_set_cs) */
+	dft_spi_reset();
+
+	/* Enable PAUSE_EN before starting so CS stays low across all 32-byte FIFO chunks */
+	uint32_t cmd = dft_spi_r(SPI_CMD_REG) | SPI_CMD_PAUSE_EN;
 	dft_spi_w(SPI_CMD_REG, cmd);
-	(void)dft_spi_r(SPI_STATUS0_REG);
+	(void)dft_spi_r(SPI_CMD_REG);
 
 	uint32_t off = 0;
 	while (off < len) {
@@ -207,20 +226,22 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 			dft_spi_w(SPI_TX_DATA_REG, v);
 		}
 
-		/* Start (chunk 0) or Resume (subsequent chunks) */
-		dft_spi_w(SPI_CMD_REG, cmd | (off == 0 ? SPI_CMD_ACT : SPI_CMD_RESUME));
+		/* Read-modify-write SPI_CMD_REG (preserves ACT in pause mode, matching spi-mt65xx!) */
+		uint32_t cur = dft_spi_r(SPI_CMD_REG);
+		dft_spi_w(SPI_CMD_REG, cur | (off == 0 ? SPI_CMD_ACT : SPI_CMD_RESUME));
 
 		/* Poll STATUS0 for FINISH_IF (bit 0) or PAUSE_IF (bit 1) */
 		uint32_t st = 0;
-		for (int spin = 0; spin < 500000; spin++) {
+		for (int spin = 0; spin < 1000000; spin++) {
 			st = dft_spi_r(SPI_STATUS0_REG);
 			if (st & 0x3u) {
 				break;
 			}
 		}
 		if (!(st & 0x3u)) {
-			dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_RST);
-			dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE);
+			printf("touch: spi timeout off=%u/%u st0=%x st1=%x cmd=%x\n",
+			    off, len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));
+			dft_spi_reset();
 			return -2;
 		}
 
@@ -246,10 +267,11 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 		off += chunk;
 	}
 
-	/* Deassert CS cleanly: clear PAUSE_EN and pulse RST (matches mtk_spi_set_cs) */
-	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE);
-	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_RST);
-	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE);
+	/* Deassert CS cleanly: clear PAUSE_EN and pulse RST with readback (matches mtk_spi_set_cs) */
+	uint32_t c2 = dft_spi_r(SPI_CMD_REG) & ~SPI_CMD_PAUSE_EN;
+	dft_spi_w(SPI_CMD_REG, c2);
+	(void)dft_spi_r(SPI_CMD_REG);
+	dft_spi_reset();
 	return 0;
 }
 
@@ -319,7 +341,7 @@ dft_fts_reset(void)
 static int
 dft_fts_write_section(const uint8_t *buf, uint32_t len, uint32_t base_addr)
 {
-	const uint32_t chunk_max = 1024;
+	const uint32_t chunk_max = 512;
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t chunk = len - off;
@@ -333,16 +355,21 @@ dft_fts_write_section(const uint8_t *buf, uint32_t len, uint32_t base_addr)
 			(uint8_t)((addr >> 8) & 0xff),
 			(uint8_t)(addr & 0xff)
 		};
-		int rc = dft_fts_write(acmd, 4);
-		if (rc) {
-			printf("touch: 0xAD addr 0x%x err %d\n", addr, rc);
-			return rc;
+		int rc = -1;
+		for (int retry = 0; retry < 3; retry++) {
+			rc = dft_fts_write(acmd, 4);
+			if (rc == 0) {
+				dft_pkt_buf[0] = 0xae;
+				__builtin_memcpy(dft_pkt_buf + 1, buf + off, chunk);
+				rc = dft_fts_write(dft_pkt_buf, chunk + 1u);
+				if (rc == 0) {
+					break;
+				}
+			}
+			IOSleep(2);
 		}
-		dft_pkt_buf[0] = 0xae;
-		__builtin_memcpy(dft_pkt_buf + 1, buf + off, chunk);
-		rc = dft_fts_write(dft_pkt_buf, chunk + 1u);
 		if (rc) {
-			printf("touch: 0xAE off 0x%x err %d\n", off, rc);
+			printf("touch: write off 0x%x (addr 0x%x) failed (%d)\n", off, addr, rc);
 			return rc;
 		}
 		off += chunk;

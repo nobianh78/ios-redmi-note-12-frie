@@ -559,7 +559,12 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     if (a->structureInput && a->structureInputSize >= 0x60) {
       uint8_t *p = (uint8_t *)a->structureInput;
       uint32_t s0 = *(uint32_t *)(p + 0x54);
-      if (s_swap_cnt <= 15) {
+      static uint32_t s_last_nb = 0;
+      static uint32_t s_nb_logs = 0;
+      int diff = (int)nonblack - (int)s_last_nb;
+      if (diff < 0) diff = -diff;
+      if (s_swap_cnt <= 10 || (diff > 5000 && s_nb_logs++ < 30)) {
+        s_last_nb = nonblack;
         printf("mfb: SwapEnd #%u sid=%u nz=%u nb=%u [0]=0x%x [mid]=0x%x\n",
                s_swap_cnt, s0, nonzero, nonblack,
                g_sw_fb_kva ? g_sw_fb_kva[0] : 0,
@@ -772,8 +777,10 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
     if (a->scalarOutputCount >= 1) {
       a->scalarOutput[0] = target_sid; /* surface_id */
     }
-    printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector,
-           target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
+    if (df_ios_logs <= 40) {
+      printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector,
+             target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
+    }
   }
   if (selector == 9) {
     static uint32_t s_seed = 1;
@@ -783,9 +790,11 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
     if (a->structureOutput && a->structureOutputSize >= 4) {
       *(uint32_t *)a->structureOutput = s_seed;
     }
-    printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
+    if (df_ios_logs <= 40) {
+      printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
+    }
   }
-  if (selector == 27) {
+  if (selector == 27 && df_ios_logs <= 40) {
     printf("ios: sel 27 (set_bulk_attachments)\n");
   }
   return kIOReturnSuccess;

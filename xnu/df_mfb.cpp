@@ -651,8 +651,17 @@ IOReturn DFMobileFramebufferUC::externalMethod(
           const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
           for (uint32_t x = 0; x < DF_MFB_W; x++) {
             uint32_t px = *src++;
-            if ((px & 0x00ffffffU) == 0) {
-              px = wrow[x >> 1];
+            uint32_t r = (px >> 16) & 0xff, g = (px >> 8) & 0xff, b = px & 0xff;
+            uint32_t a = r > g ? r : g;
+            a = a > b ? a : b;
+            if (a < 250) {
+              /* UI was rendered over black: treat brightness as coverage and add the
+               * wallpaper behind it (out = ui + wall * (1 - a)), no dark halos on edges */
+              uint32_t w = wrow[x >> 1], k = 255 - a;
+              r += (((w >> 16) & 0xff) * k) >> 8;
+              g += (((w >> 8) & 0xff) * k) >> 8;
+              b += ((w & 0xff) * k) >> 8;
+              px = (r << 16) | (g << 8) | b;
             }
             *dst++ = px | 0xff000000U;
           }

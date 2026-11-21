@@ -256,6 +256,12 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 				break;
 			}
 		}
+		if (!(st & 0x3u) && (dft_spi_r(SPI_STATUS1_REG) & 1u) &&
+		    !(dft_spi_r(SPI_CMD_REG) & SPI_CMD_ACT)) {
+			/* Controller idle + ACT self-cleared: packet went out but
+			 * FINISH_IF was missed. Accept it; ECC validates the data. */
+			st = 1;
+		}
 		if (!(st & 0x3u)) {
 			printf("touch: spi timeout try=%d len=%u st0=%x st1=%x cmd=%x\n",
 			    attempt, len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));

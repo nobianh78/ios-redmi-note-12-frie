@@ -1557,6 +1557,8 @@ for m in 'DF_WQ(4)' 'fire wq sc rq' 'no req admitted' 'wq stack fail' 'thcreate 
 exit_c="$src/bsd/kern/kern_exit.c"
 perl -0pi -e 's@(\tprintf\("pid %d exited -- exit reason namespace %d subcode 0x%llx, description %s\\n", proc_getpid\(p\),)@\tif (proc_getpid(p) == 1) { extern void df_sc_dump(void); df_sc_dump(); printf("fire launchd exit: sig=%d csflags=0x%x\\n", WTERMSIG(rv), proc_getcsflags(p)); } /* fix-xcode16 */\n$1@' "$exit_c"
 grep -q 'fire launchd exit' "$exit_c" || { echo "fix-xcode16: kern_exit patch missing"; exit 1; }
+perl -0pi -e 's@(\nproc_prepareexit\(proc_t p, int rv, boolean_t perf_notify\)\n\{\n)@$1\t{ os_reason_t df_r = p->p_exit_reason; printf("DF_EXIT %s[%d] rv=0x%x sig=%d ns=%u code=0x%llx\\n", proc_best_name(p), proc_getpid(p), rv, WIFSIGNALED(rv) ? WTERMSIG(rv) : 0, df_r ? df_r->osr_namespace : 0, df_r ? (unsigned long long)df_r->osr_code : 0ULL); } /* fix-xcode16 df_exit */\n@' "$exit_c"
+grep -q 'df_exit \*/' "$exit_c" || { echo "fix-xcode16: df_exit patch missing"; exit 1; }
 #        kern_cs.c: disable global code signing enforcement
 cs_c="$src/bsd/kern/kern_cs.c"
 perl -0pi -e 's@(\ncs_process_global_enforcement\(void\)\n\{\n\treturn )cs_process_enforcement_enable \? 1 : 0;@${1}0; /* fix-xcode16 */@' "$cs_c"

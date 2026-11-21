@@ -171,6 +171,15 @@ def main():
             d['RunAtLoad'] = False
         lp['LaunchDaemons'][dp] = d
 
+    # Debug: mirror os_log of SpringBoard + backboardd to the serial console
+    for k, d in lp['LaunchDaemons'].items():
+        if k.endswith('com.apple.SpringBoard.plist') or k.endswith('com.apple.backboardd.plist'):
+            env = d.setdefault('EnvironmentVariables', {})
+            env['OS_ACTIVITY_DT_MODE'] = '1'
+            d['StandardErrorPath'] = '/dev/console'
+            d['StandardOutPath'] = '/dev/console'
+            print(f'[+] os_log -> console: {k}')
+
     new_raw = plistlib.dumps(lp, fmt=plistlib.FMT_BINARY)
     if len(new_raw) > max_bytes:
         lp['AppRemovalServices'] = {}

@@ -176,12 +176,14 @@ dft_spi_reset(void)
 	(void)dft_spi_r(SPI_STATUS0_REG);
 }
 
-/* Full-duplex polled FIFO PIO transfer on MT6768 SPI2 (32-byte hardware FIFO,
- * pause-mode keeps CS asserted across chunks > 32 bytes, matching spi-mt65xx.c). */
+/* Full-duplex polled single-shot FIFO PIO transfer on MT6768 SPI2.
+ * Every FT8720 transfer is kept <= 32 bytes (0xAE chunks = 24B -> 31B wire,
+ * touch read = 20B -> 29B wire for 3 fingers) so PAUSE_EN / RESUME is never
+ * needed and every transfer completes in one hardware FIFO shot (FINISH_IF). */
 static int
 dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 {
-	if (!dft_spi || len == 0) {
+	if (!dft_spi || len == 0 || len > 32) {
 		return -1;
 	}
 	/* Wait for SPI2 controller idle (STATUS1 bit 0 == 1) */
@@ -190,88 +192,66 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 			break;
 		}
 	}
-	/* Clean soft reset with readback barriers (matches mtk_spi_set_cs) */
 	dft_spi_reset();
 
-	/* Enable PAUSE_EN before starting so CS stays low across all 32-byte FIFO chunks */
-	uint32_t cmd = dft_spi_r(SPI_CMD_REG) | SPI_CMD_PAUSE_EN;
-	dft_spi_w(SPI_CMD_REG, cmd);
-	(void)dft_spi_r(SPI_CMD_REG);
+	/* Program packet_len = len (bits 25:16), packet_loop = 1 (bits 15:8), cs_idle = 5 */
+	uint32_t cfg1 = ((len - 1u) << 16) | (0u << 8) | 5u;
+	dft_spi_w(SPI_CFG1_REG, cfg1);
 
-	uint32_t off = 0;
-	while (off < len) {
-		uint32_t chunk = len - off;
-		if (chunk > 32) {
-			chunk = 32;
+	/* Fill TX FIFO as 32-bit LE words */
+	uint32_t words = len >> 2;
+	for (uint32_t w = 0; w < words; w++) {
+		uint32_t v = (uint32_t)tx[w * 4] |
+		    ((uint32_t)tx[w * 4 + 1] << 8) |
+		    ((uint32_t)tx[w * 4 + 2] << 16) |
+		    ((uint32_t)tx[w * 4 + 3] << 24);
+		dft_spi_w(SPI_TX_DATA_REG, v);
+	}
+	if (len & 3u) {
+		uint32_t v = 0;
+		uint32_t base = words << 2;
+		for (uint32_t b = 0; b < (len & 3u); b++) {
+			v |= (uint32_t)tx[base + b] << (b * 8);
 		}
-		/* Program packet_len = chunk (bits 25:16), packet_loop = 1 (bits 15:8), cs_idle = 5 */
-		uint32_t cfg1 = ((chunk - 1u) << 16) | (0u << 8) | 5u;
-		dft_spi_w(SPI_CFG1_REG, cfg1);
-
-		/* Fill TX FIFO as 32-bit LE words */
-		uint32_t words = chunk >> 2;
-		for (uint32_t w = 0; w < words; w++) {
-			uint32_t v = (uint32_t)tx[off + w * 4] |
-			    ((uint32_t)tx[off + w * 4 + 1] << 8) |
-			    ((uint32_t)tx[off + w * 4 + 2] << 16) |
-			    ((uint32_t)tx[off + w * 4 + 3] << 24);
-			dft_spi_w(SPI_TX_DATA_REG, v);
-		}
-		if (chunk & 3u) {
-			uint32_t v = 0;
-			uint32_t base = off + (words << 2);
-			for (uint32_t b = 0; b < (chunk & 3u); b++) {
-				v |= (uint32_t)tx[base + b] << (b * 8);
-			}
-			dft_spi_w(SPI_TX_DATA_REG, v);
-		}
-
-		/* Read-modify-write SPI_CMD_REG (preserves ACT in pause mode, matching spi-mt65xx!) */
-		uint32_t cur = dft_spi_r(SPI_CMD_REG);
-		dft_spi_w(SPI_CMD_REG, cur | (off == 0 ? SPI_CMD_ACT : SPI_CMD_RESUME));
-
-		/* Poll STATUS0 for FINISH_IF (bit 0) or PAUSE_IF (bit 1) */
-		uint32_t st = 0;
-		for (int spin = 0; spin < 1000000; spin++) {
-			st = dft_spi_r(SPI_STATUS0_REG);
-			if (st & 0x3u) {
-				break;
-			}
-		}
-		if (!(st & 0x3u)) {
-			printf("touch: spi timeout off=%u/%u st0=%x st1=%x cmd=%x\n",
-			    off, len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));
-			dft_spi_reset();
-			return -2;
-		}
-
-		/* Drain RX FIFO as 32-bit LE words */
-		for (uint32_t w = 0; w < words; w++) {
-			uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
-			if (rx) {
-				rx[off + w * 4]     = (uint8_t)(v & 0xff);
-				rx[off + w * 4 + 1] = (uint8_t)((v >> 8) & 0xff);
-				rx[off + w * 4 + 2] = (uint8_t)((v >> 16) & 0xff);
-				rx[off + w * 4 + 3] = (uint8_t)((v >> 24) & 0xff);
-			}
-		}
-		if (chunk & 3u) {
-			uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
-			if (rx) {
-				uint32_t base = off + (words << 2);
-				for (uint32_t b = 0; b < (chunk & 3u); b++) {
-					rx[base + b] = (uint8_t)((v >> (b * 8)) & 0xff);
-				}
-			}
-		}
-		off += chunk;
+		dft_spi_w(SPI_TX_DATA_REG, v);
 	}
 
-	/* Deassert CS cleanly: clear PAUSE_EN and pulse RST with readback (matches mtk_spi_set_cs) */
-	uint32_t c2 = dft_spi_r(SPI_CMD_REG) & ~SPI_CMD_PAUSE_EN;
-	dft_spi_w(SPI_CMD_REG, c2);
-	(void)dft_spi_r(SPI_CMD_REG);
-	dft_spi_reset();
+	/* Single-shot trigger (no PAUSE_EN): ACT -> FINISH_IF -> CS auto-deassert */
+	dft_spi_w(SPI_CMD_REG, SPI_CMD_BASE | SPI_CMD_ACT);
+
+	uint32_t st = 0;
+	for (int spin = 0; spin < 500000; spin++) {
+		st = dft_spi_r(SPI_STATUS0_REG);
+		if (st & 0x3u) {
+			break;
+		}
+	}
+	if (!(st & 0x3u)) {
+		printf("touch: spi timeout len=%u st0=%x st1=%x cmd=%x\n",
+		    len, st, dft_spi_r(SPI_STATUS1_REG), dft_spi_r(SPI_CMD_REG));
+		dft_spi_reset();
+		return -2;
+	}
+
+	/* Drain RX FIFO as 32-bit LE words */
+	for (uint32_t w = 0; w < words; w++) {
+		uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
+		if (rx) {
+			rx[w * 4]     = (uint8_t)(v & 0xff);
+			rx[w * 4 + 1] = (uint8_t)((v >> 8) & 0xff);
+			rx[w * 4 + 2] = (uint8_t)((v >> 16) & 0xff);
+			rx[w * 4 + 3] = (uint8_t)((v >> 24) & 0xff);
+		}
+	}
+	if (len & 3u) {
+		uint32_t v = dft_spi_r(SPI_RX_DATA_REG);
+		if (rx) {
+			uint32_t base = words << 2;
+			for (uint32_t b = 0; b < (len & 3u); b++) {
+				rx[base + b] = (uint8_t)((v >> (b * 8)) & 0xff);
+			}
+		}
+	}
 	return 0;
 }
 
@@ -337,11 +317,11 @@ dft_fts_reset(void)
 	IOSleep(10);
 }
 
-/* Upload a PRAM/DRAM section using 0xAD (set 24-bit addr) + 0xAE (write data) */
+/* Upload a PRAM/DRAM section using 0xAD (set 24-bit addr) + 0xAE (write 24B data -> 31B wire) */
 static int
 dft_fts_write_section(const uint8_t *buf, uint32_t len, uint32_t base_addr)
 {
-	const uint32_t chunk_max = 512;
+	const uint32_t chunk_max = 24;
 	uint32_t off = 0;
 	while (off < len) {
 		uint32_t chunk = len - off;
@@ -366,7 +346,7 @@ dft_fts_write_section(const uint8_t *buf, uint32_t len, uint32_t base_addr)
 					break;
 				}
 			}
-			IOSleep(2);
+			IOSleep(1);
 		}
 		if (rc) {
 			printf("touch: write off 0x%x (addr 0x%x) failed (%d)\n", off, addr, rc);
@@ -548,8 +528,10 @@ static unsigned dft_log_cnt;
 static void
 dft_poll_fts(void)
 {
-	uint8_t buf[64];
-	if (dft_fts_read(0x01, buf, 62) != 0) {
+	/* Read 20 bytes from reg 0x01 (29B total SPI wire <= 32B single FIFO shot):
+	 * buf[0]=gesture, buf[1]=mode|count, buf[2..19] = up to 3 fingers x 6B */
+	uint8_t buf[24];
+	if (dft_fts_read(0x01, buf, 20) != 0) {
 		return;
 	}
 	if (buf[1] == 0xff && buf[2] == 0xff && buf[3] == 0xff && buf[4] == 0xff) {
@@ -567,7 +549,7 @@ dft_poll_fts(void)
 
 	int cur_any = 0;
 	if (point_num > 0) {
-		for (int i = 0; i < 10; i++) {
+		for (int i = 0; i < 3; i++) {
 			uint8_t *p = buf + 2 + i * 6;
 			if (p[2] > 0x9f) {
 				break;

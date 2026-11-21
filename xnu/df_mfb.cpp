@@ -11,6 +11,7 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOWorkLoop.h>
+#include "df_apple_logo.h"
 
 extern "C" int proc_selfpid(void);
 extern "C" volatile uint32_t *df_fbva;
@@ -39,6 +40,8 @@ static mach_vm_address_t g_user_fb_addr = 0;
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
 static uint32_t *g_sw_fb_kva = NULL;
 static volatile uint32_t *df_l0va = NULL;
+static volatile int g_boot_logo_done = 0;
+static uint32_t g_boot_bar_ticks = 0;
 
 static void df_flush_fb(void) {
   if (df_wdt) {
@@ -93,12 +96,72 @@ static void df_clear_l0(void) {
   }
 }
 
+#define DF_BAR_X 330
+#define DF_BAR_Y 1480
+#define DF_BAR_W 420
+#define DF_BAR_H 8
+
+static void df_draw_boot_bar(uint32_t fill_w, uint32_t pulse_x) {
+  if (!df_fbva || g_boot_logo_done)
+    return;
+  if (fill_w > DF_BAR_W)
+    fill_w = DF_BAR_W;
+  for (uint32_t dy = 0; dy < DF_BAR_H; dy++) {
+    volatile uint32_t *row = &df_fbva[(DF_BAR_Y + dy) * DF_MFB_W + DF_BAR_X];
+    int edge = (dy == 0 || dy == DF_BAR_H - 1);
+    for (uint32_t dx = 0; dx < DF_BAR_W; dx++) {
+      if (edge && (dx < 2 || dx >= DF_BAR_W - 2)) {
+        row[dx] = 0xff000000U;
+      } else if (dx < fill_w) {
+        row[dx] = 0xffffffffU;
+      } else if (dx >= pulse_x && dx < pulse_x + 36) {
+        row[dx] = 0xff707070U;
+      } else {
+        row[dx] = 0xff2c2c2eU;
+      }
+    }
+    for (uintptr_t a = (uintptr_t)row; a < (uintptr_t)(row + DF_BAR_W);
+         a += 64) {
+      __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
+    }
+  }
+  __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void df_draw_apple_logo(void) {
+  if (!df_fbva)
+    return;
+  const uint32_t x0 = (DF_MFB_W - DF_LOGO_W) / 2;
+  const uint32_t y0 = (DF_MFB_H - DF_LOGO_H) / 2 - 40;
+  uint32_t idx = 0;
+  const uint32_t total = (uint32_t)DF_LOGO_W * DF_LOGO_H;
+  for (uint32_t k = 0; k + 1 < DF_LOGO_RLE_LEN && idx < total; k += 2) {
+    uint32_t run = df_apple_logo_rle[k];
+    uint32_t v = df_apple_logo_rle[k + 1];
+    if (v == 0) {
+      idx += run;
+      continue;
+    }
+    uint32_t col = 0xff000000U | (v << 16) | (v << 8) | v;
+    while (run-- && idx < total) {
+      uint32_t lx = idx % DF_LOGO_W;
+      uint32_t ly = idx / DF_LOGO_W;
+      df_fbva[(y0 + ly) * DF_MFB_W + (x0 + lx)] = col;
+      idx++;
+    }
+  }
+  df_draw_boot_bar(12, 0);
+}
+
 static void df_clear_fb(void) {
   df_clear_l0();
   if (!df_fbva)
     return;
   for (size_t i = 0; i < (size_t)DF_MFB_W * DF_MFB_H; i++) {
     df_fbva[i] = 0xff000000;
+  }
+  if (!g_boot_logo_done) {
+    df_draw_apple_logo();
   }
   df_flush_fb();
 }
@@ -256,6 +319,14 @@ void IOMobileFramebuffer::wdtTimerAction(OSObject *owner,
                                          IOTimerEventSource *sender) {
   if (df_wdt) {
     df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
+  }
+  if (df_gui_active && !g_boot_logo_done && df_fbva) {
+    g_boot_bar_ticks++;
+    uint32_t fill = 12 + (g_boot_bar_ticks * (DF_BAR_W - 28)) / 360;
+    if (fill > DF_BAR_W - 16)
+      fill = DF_BAR_W - 16;
+    uint32_t pulse = (g_boot_bar_ticks * 14) % (DF_BAR_W - 36);
+    df_draw_boot_bar(fill, pulse);
   }
   if (sender) {
     sender->setTimeoutMS(500);
@@ -547,12 +618,19 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
       for (size_t i = 0; i < n; i++) {
         uint32_t px = g_sw_fb_kva[i];
-        df_fbva[i] = px | 0xff000000U;
         if (px != 0) {
           nonzero++;
           if ((px & 0x00ffffffU) != 0) {
             nonblack++;
           }
+        }
+      }
+      if (nonblack > 2000) {
+        g_boot_logo_done = 1;
+      }
+      if (g_boot_logo_done) {
+        for (size_t i = 0; i < n; i++) {
+          df_fbva[i] = g_sw_fb_kva[i] | 0xff000000U;
         }
       }
     }
@@ -571,7 +649,9 @@ IOReturn DFMobileFramebufferUC::externalMethod(
                g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
-    df_flush_fb();
+    if (g_boot_logo_done) {
+      df_flush_fb();
+    }
   }
   return kIOReturnSuccess;
 }

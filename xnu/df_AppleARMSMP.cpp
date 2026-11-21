@@ -49,7 +49,7 @@ static const ml_topology_info *topology_info;
 static unsigned int boot_cpu;
 static processor_t *machProcessors;
 static ipi_handler_t df_ipi_handler;
-static unsigned int df_max_cpus = 6;
+static unsigned int df_max_cpus = 2;   /* raise to 6 once 2-core boot is stable */
 
 bool cluster_power_supported = false;
 static uint64_t cpu_power_state_mask;
@@ -75,6 +75,39 @@ df_psci_cpu_on(uint64_t mpidr, uint64_t entry)
 	    : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
 	    "x14", "x15", "x16", "x17", "memory");
 	return x0;
+}
+
+/*
+ * Clean every data/unified cache level to the point of coherency by set/way.
+ * flush_dcache() is only a DSB on this XNU, but a core released by PSCI runs the reset vector
+ * with MMU and caches off and must see ResetHandlerData / CpuDataEntries / cpu_data in DRAM.
+ */
+static void
+df_clean_dcache_all(void)
+{
+	uint64_t clidr, ccsidr;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	__asm__ volatile ("mrs %0, CLIDR_EL1" : "=r"(clidr));
+	unsigned loc = (clidr >> 24) & 7;
+	for (unsigned level = 0; level < loc; level++) {
+		unsigned ctype = (clidr >> (level * 3)) & 7;
+		if (ctype < 2) {
+			continue;       /* no cache or I-cache only */
+		}
+		__asm__ volatile ("msr CSSELR_EL1, %0; isb" :: "r"((uint64_t)(level << 1)));
+		__asm__ volatile ("mrs %0, CCSIDR_EL1" : "=r"(ccsidr));
+		unsigned line_shift = (unsigned)(ccsidr & 7) + 4;
+		unsigned ways = (unsigned)((ccsidr >> 3) & 0x3ff);
+		unsigned sets = (unsigned)((ccsidr >> 13) & 0x7fff);
+		unsigned way_shift = ways ? (unsigned)__builtin_clz(ways) : 0;
+		for (unsigned w = 0; w <= ways; w++) {
+			for (unsigned s = 0; s <= sets; s++) {
+				uint64_t v = ((uint64_t)w << way_shift) | ((uint64_t)s << line_shift) | (level << 1);
+				__asm__ volatile ("dc csw, %0" :: "r"(v) : "memory");
+			}
+		}
+	}
+	__asm__ volatile ("msr CSSELR_EL1, xzr; dsb sy; isb" ::: "memory");
 }
 
 /* GICv3 SGI to one core. fire: every core has aff0 = 0, aff1 = core number. */
@@ -191,7 +224,10 @@ PE_cpu_start(cpu_id_t target,
 		extern unsigned int LowResetVectorBase;
 		uint64_t entry = ml_vtophys((vm_offset_t)&LowResetVectorBase);
 		uint64_t mpidr = topology_info->cpus[cpu_id].phys_id;
+		boolean_t istate = ml_set_interrupts_enabled(FALSE);
+		df_clean_dcache_all();
 		uint64_t r = df_psci_cpu_on(mpidr, entry);
+		ml_set_interrupts_enabled(istate);
 		printf("df_smp: PSCI CPU_ON cpu %u mpidr 0x%llx entry 0x%llx -> %lld\n",
 		    cpu_id, mpidr, entry, (long long)r);
 		if ((int64_t)r != 0 && (int64_t)r != -4 /* ALREADY_ON */) {

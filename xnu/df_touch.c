@@ -213,8 +213,17 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 				break;
 			}
 		}
-		/* Clear any stale status flag */
-		(void)dft_spi_r(SPI_STATUS0_REG);
+		/* e1d6456 behaviour (99.75% ok on HW): RST pulse before every packet
+		 * resets FIFO/state machine on MT6768; without it ACT never finishes. */
+		{
+			uint32_t v = dft_spi_r(SPI_CMD_REG);
+			dft_spi_w(SPI_CMD_REG, v | SPI_CMD_RST);
+			(void)dft_spi_r(SPI_CMD_REG);
+			dft_spi_w(SPI_CMD_REG, (v & ~(SPI_CMD_RST | SPI_CMD_PAUSE_EN |
+			    SPI_CMD_ACT | SPI_CMD_RESUME)) | SPI_CMD_BASE);
+			(void)dft_spi_r(SPI_CMD_REG);
+			(void)dft_spi_r(SPI_STATUS0_REG);
+		}
 
 		/* Program packet_len = len (bits 25:16), packet_loop = 1 (bits 15:8), cs_idle = 5 */
 		dft_spi_w(SPI_CFG1_REG, cfg1);
@@ -241,7 +250,7 @@ dft_spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
 		dft_spi_w(SPI_CMD_REG, cur_cmd | SPI_CMD_BASE | SPI_CMD_ACT);
 
 		uint32_t st = 0;
-		for (int spin = 0; spin < 50000; spin++) {
+		for (int spin = 0; spin < 500000; spin++) {
 			st = dft_spi_r(SPI_STATUS0_REG);
 			if (st & 0x3u) {
 				break;
@@ -402,7 +411,10 @@ dft_fts_ecc_check(const uint8_t *buf, uint32_t len)
 		(uint8_t)((len >> 8) & 0xff),
 		(uint8_t)(len & 0xff)
 	};
-	int rc = dft_fts_write(cmd, 7);
+	int rc = -1;
+	for (int t = 0; t < 5 && rc; t++) {
+		rc = dft_fts_write(cmd, 7);
+	}
 	if (rc) {
 		return rc;
 	}
@@ -421,7 +433,10 @@ dft_fts_ecc_check(const uint8_t *buf, uint32_t len)
 		return -4;
 	}
 	uint8_t ec[2] = { 0, 0 };
-	rc = dft_fts_read(0xcd, ec, 2);
+	rc = -1;
+	for (int t = 0; t < 5 && rc; t++) {
+		rc = dft_fts_read(0xcd, ec, 2);
+	}
 	if (rc) {
 		return rc;
 	}

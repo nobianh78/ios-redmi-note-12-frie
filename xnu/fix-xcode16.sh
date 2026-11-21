@@ -1160,7 +1160,7 @@ grep -q 'MRS SSBS needs FEAT_SSBS2' "$cp_c" || { echo "fix-xcode16: SSBS2 check 
 #        the catch-all that matches when no platform kext does (VMAPPLE uses the closed
 #        AppleVirtualPlatform). Let the catch-all run the generic IOPlatformExpert instead.
 pe_cpp="$src/iokit/Kernel/IOPlatformExpert.cpp"
-perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n\t    platform_name\);\n\n\treturn false;|\t/* fix-xcode16: no platform kext on fire: fall back to the generic IOPlatformExpert */\n\tIOLog("fire: no driver for platform \\"%s\\", using generic IOPlatformExpert\\n", platform_name);\n\tbool df_ok = IOPlatformExpert::start(provider);\n\t/* fix-xcode16: AppleARMSMP (needs a platform interrupt controller) normally calls ml_set_max_cpus;\n\t * without it kperf_init_early blocks forever in ml_wait_max_cpus. Boot CPU only for now. */\n\tml_set_max_cpus(1);\n\t/* fix-xcode16: platform drivers registerService() at the end of start(); without it\n\t * IOSecureBSDRoot\x27s waitForMatchingService("IOPlatformExpert") times out and returns NULL. */\n\tif (df_ok) {\n\t\tregisterService();\n\t\tdf_mfb_attach(this); /* fix-xcode16 P6 */\n\t}\n\treturn df_ok;|' "$pe_cpp"
+perl -0pi -e 's|\tpanic\("Unable to find driver for this platform: \\"%s\\".",\n\t    platform_name\);\n\n\treturn false;|\t/* fix-xcode16: no platform kext on fire: fall back to the generic IOPlatformExpert */\n\tIOLog("fire: no driver for platform \\"%s\\", using generic IOPlatformExpert\\n", platform_name);\n\tbool df_ok = IOPlatformExpert::start(provider);\n\t/* fix-xcode16: AppleARMSMP (needs a platform interrupt controller) normally calls ml_set_max_cpus;\n\t * without it kperf_init_early blocks forever in ml_wait_max_cpus. Boot CPU only for now. */\n\t/* fix-xcode16: max cpus now set by df_AppleARMSMP.cpp cpu_boot_thread */\n\t/* fix-xcode16: platform drivers registerService() at the end of start(); without it\n\t * IOSecureBSDRoot\x27s waitForMatchingService("IOPlatformExpert") times out and returns NULL. */\n\tif (df_ok) {\n\t\tregisterService();\n\t\tdf_mfb_attach(this); /* fix-xcode16 P6 */\n\t}\n\treturn df_ok;|' "$pe_cpp"
 perl -0pi -e 's|^|extern "C" void ml_set_max_cpus(unsigned int); /* fix-xcode16 */\n|' "$pe_cpp"
 perl -0pi -e 's|^|extern "C" void df_mfb_attach(class IOService *); /* fix-xcode16 P6 */\n|' "$pe_cpp"
 cp "$(dirname "$0")/df_apple_logo.h" "$src/iokit/Kernel/df_apple_logo.h"
@@ -1404,6 +1404,32 @@ sleh_c="$src/osfmk/arm64/sleh.c"
 cat "$(dirname "$0")/df_thdump.c" >> "$sleh_c"   # fix-xcode16 P6: backboardd thread dump
 perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\t{ extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps; df_irq_pc = get_saved_state_pc(state); df_irq_lr = get_saved_state_lr(state); df_irq_fp = get_saved_state_fp(state); df_irq_ps = get_saved_state_cpsr(state); if ((df_irq_ps \& 0x1f) == 0) { extern void df_bb_sample(uint64_t, uint64_t); df_bb_sample(df_irq_pc, df_irq_lr); } }\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
+#        SMP: SGI 1 = cross-CPU IPI (df_AppleARMSMP.cpp) -> cpu_signal_handler on the receiving core.
+perl -0pi -e 's|(\t\t/\* shortcut: device IRQs are acked and dropped)|\t\tif (df_id == 1) { extern void df_smp_ipi(void); df_smp_ipi(); } /* fix-xcode16 df_smp */\n$1|' "$sleh_c"
+grep -q 'df_smp \*/' "$sleh_c" || { echo "fix-xcode16: SGI IPI dispatch not inserted"; exit 1; }
+cp "$(dirname "$0")/df_AppleARMSMP.cpp" "$src/iokit/Kernel/arm/AppleARMSMP.cpp"
+cat >> "$src/pexpert/arm/pe_fiq.c" <<'DFEOF'
+
+#if HAS_GIC_V3
+/* fix-xcode16 df_smp: enable SGIs 0-15 in this core's redistributor (IPIs). */
+void df_gicr_enable_sgi(void);
+void
+df_gicr_enable_sgi(void)
+{
+	if (!gicd_base) {
+		return;
+	}
+	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+	gicr_write32(GICR_ISENABLER0, 0x0000ffff);
+}
+#else
+void df_gicr_enable_sgi(void);
+void
+df_gicr_enable_sgi(void)
+{
+}
+#endif
+DFEOF
 #        Log EL0 exceptions (SVC = syscalls of PID 1, aborts = its faults)
 perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ if (!PSR64_IS_USER(get_saved_state_cpsr(state)) && class != 0x24 && class != 0x25) { extern void df_fault_dump(const char *, uint32_t, uint64_t, uint64_t, uint64_t); df_fault_dump("EL1 FAULT", esr, (uint64_t)far, get_saved_state_pc(state), get_saved_state_lr(state)); } } { static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && class != 0x15 && ((class != 0x20 && class != 0x24) \|\| (far >> 48) != 0 \|\| far < 0x10000)) { df_n++; /* screen filter: real faults only, not SVC or demand paging */ printf("SEGV el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) { extern int proc_selfpid(void); uint32_t df_sl = 0; vm_shared_region_t df_sr = vm_shared_region_get(current_task()); if (df_sr) { df_sl = df_sr->sr_slide; vm_shared_region_deallocate(df_sr); } printf("SEGV regs pid %d slide 0x%x x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", proc_selfpid(), df_sl, (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class == 0x3c) { for (int df_r = 0; df_r < 4; df_r++) { char df_s[160]; size_t df_n = 0; int df_e = copyinstr((user_addr_t)saved_state64(state)->x[df_r], df_s, sizeof(df_s), \&df_n); if (df_e == 0 \|\| df_n > 8) { df_s[sizeof(df_s) - 1] = 0; printf("BRK x%d: %s\\n", df_r, df_s); } } } } if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"
 perl -0pi -e 's|(\nsleh_serror\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n)|$1\t{ extern void df_fault_dump(const char *, uint32_t, uint64_t, uint64_t, uint64_t); df_fault_dump("SERROR", esr, (uint64_t)far, get_saved_state_pc(&context->ss), get_saved_state_lr(&context->ss)); } /* fix-xcode16 */\n|' "$sleh_c"

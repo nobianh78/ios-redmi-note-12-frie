@@ -105,6 +105,18 @@ def build_fire_adt() -> bytes:
     cpu0.add_property("timebase-frequency", u32(13_000_000))  # CNTFRQ_EL0 measured on the phone
     cpu0.add_property("clock-frequency", u32(2_000_000_000))
     cpus.add_child(cpu0)
+    # Secondary LITTLE cores (Cortex-A55, MPIDR aff1 = core number) brought up by df_AppleARMSMP.cpp
+    # through PSCI CPU_ON. The A75 cluster (cpu6/7) stays off until the A55-only SMP is stable.
+    for n in range(1, 6):
+        c = ADTNode(f"cpu{n}")
+        c.add_property("device_type", cstr("cpu"))
+        c.add_property("compatible", cstr("arm,cortex-a55"))
+        c.add_property("reg", u32(n << 8))
+        c.add_property("cpu-id", u32(n))
+        c.add_property("state", cstr("waiting"))
+        c.add_property("timebase-frequency", u32(13_000_000))
+        c.add_property("clock-frequency", u32(2_000_000_000))
+        cpus.add_child(c)
     root.add_child(cpus)
 
     # MT6768 peripherals live at 0x0c000000..0x1fffffff (GIC 0x0c000000, TOPRGU 0x10007000,

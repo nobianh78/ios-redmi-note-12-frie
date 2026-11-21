@@ -36,6 +36,9 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 #define DF_L0_H 2460
 
 static mach_vm_address_t g_user_fb_addr = 0;
+static volatile int df_after50 = 0; /* trace everything after mfb sel 50 (GUI hang hunt) */
+static volatile uint32_t df_seq = 0;
+#define DF_T(...) do { if (df_after50 && df_seq < 3000) { printf("T%u ", df_seq++); printf(__VA_ARGS__); } } while (0)
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
 static uint32_t *g_sw_fb_kva = NULL;
 static volatile uint32_t *df_l0va = NULL;
@@ -366,6 +369,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
   }
   uc->fVsyncCount++;
+  DF_T("vsync tick %llu\n", (unsigned long long)uc->fVsyncCount);
   uint64_t now = 0;
   clock_get_uptime(&now);
   for (int i = 0; i < 4; i++) {
@@ -389,7 +393,9 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     msg.msgh_local_port = MACH_PORT_NULL;
     msg.msgh_voucher_port = 0;
     msg.msgh_id = 0;
+    DF_T("vsync notify send\n");
     mach_msg_return_t mr = mach_msg_send_from_kernel_proper(&msg, sizeof(msg));
+    DF_T("vsync notify sent 0x%x\n", (unsigned)mr);
     if (++s_notify_cnt <= 5) {
       printf("mfb: notify type=3 #%u -> 0x%x\n", s_notify_cnt, (unsigned)mr);
     }
@@ -412,6 +418,10 @@ IOReturn DFMobileFramebufferUC::registerNotificationPort(
 IOReturn DFMobileFramebufferUC::externalMethod(
     uint32_t selector, IOExternalMethodArguments *a,
     IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) {
+  if (selector == 50) {
+    df_after50 = 1;
+  }
+  DF_T("mfb> sel %u pid %d\n", selector, proc_selfpid());
   if (df_mfb_logs++ < 400) {
     printf("mfb sel %u pid %d in %u/%u out %u/%u async=%d\n", selector,
            proc_selfpid(), a->scalarInputCount, a->structureInputSize,
@@ -554,9 +564,12 @@ IOReturn DFMobileFramebufferUC::externalMethod(
                g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
+    DF_T("mfb SwapEnd blit done, flushing\n");
     df_flush_fb();
+    DF_T("mfb SwapEnd flushed\n");
   }
   if (selector == 6) {
+    DF_T("mfb SwapWait blit\n");
     /* SwapWait */
     if (g_sw_fb_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
@@ -566,6 +579,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     }
     df_flush_fb();
   }
+  DF_T("mfb< sel %u\n", selector);
   return kIOReturnSuccess;
 }
 
@@ -654,6 +668,7 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
                                          IOExternalMethodArguments *a,
                                          IOExternalMethodDispatch *dispatch,
                                          OSObject *target, void *reference) {
+  DF_T("ios> sel %u pid %d\n", selector, proc_selfpid());
   if (df_ios_logs++ < 400) {
     printf("ios sel %u pid %d in %u/%u out %u/%u\n", selector, proc_selfpid(),
            a->scalarInputCount, a->structureInputSize, a->scalarOutputCount,

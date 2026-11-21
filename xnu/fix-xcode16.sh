@@ -1457,7 +1457,7 @@ grep -q 'strlcpy(tt, "D221", sizeof(tt));' "$iopm_cpp" || { echo "fix-xcode16: I
 perl -0pi -e 's@(IOReturn\nIOPMrootDomain::sleepSystemOptions\([^)]*\)\n\{)@$1\n\tprintf("FIRE: BLOCKED IOPMrootDomain::sleepSystemOptions!\\n");\n\treturn kIOReturnUnsupported; /* fix-xcode16 */@' "$iopm_cpp"
 #        P6 GUI hang: CPU sleeps in machine_idle WFI and the timer IRQ never comes back. Cap every
 #        decrementer to 10 ms (13 MHz counter) so the core always wakes and timers get re-evaluated.
-perl -0pi -e 's/(\nml_set_decrementer\(uint64_t dec_value\)\s*\{\n)/$1\tif (dec_value > 130000) { dec_value = 130000; } \/\* fix-xcode16 P6: never sleep longer than 10 ms \*\/\n/' "$src/osfmk/arm64/machine_routines.c"
+perl -0pi -e 's/(\nml_set_decrementer\(uint32_t dec_value\)\s*\{\n)/$1\tif (dec_value > 130000) { dec_value = 130000; } \/\* fix-xcode16 P6: never sleep longer than 10 ms \*\/\n/' "$src/osfmk/arm64/machine_routines.c"
 grep -q 'never sleep longer than 10 ms' "$src/osfmk/arm64/machine_routines.c" || { echo "fix-xcode16: decrementer clamp missing"; grep -n -A6 '^ml_set_decrementer' "$src/osfmk/arm64/machine_routines.c"; exit 1; }
 for _f in "$src/osfmk/arm64/cpu.c" "$src/osfmk/arm64/machine_routines.c"; do
 	[ -f "$_f" ] && perl -0pi -e 's@(ml_arm_sleep\(void\)\n\{)@$1\n\textern void df_puts(const char *, unsigned long);\n\tdf_puts("FIRE: BLOCKED ml_arm_sleep!", 0);\n\treturn; /* fix-xcode16 */@' "$_f"

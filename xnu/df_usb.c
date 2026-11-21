@@ -455,7 +455,7 @@ dfu_thread(void *arg, int wr)
 			dfu_hex("faddr", dfu_r8(M_FADDR));
 			df_ps_puts(dfu_configured ? "configured\n" : "not configured\n");
 		}
-		IOSleep(10);
+		IOSleep(dfu_configured ? 5 : 1);
 	}
 }
 

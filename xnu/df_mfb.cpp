@@ -43,6 +43,19 @@ static volatile uint32_t *df_l0va = NULL;
 static volatile int g_boot_logo_done = 0;
 static uint32_t g_boot_bar_ticks = 0;
 
+/* Apple iOS 16 wallpaper (SydneyWallpaper.jpg), 540x1200 BGRA, made by tools/make_wallpaper.py.
+ * PosterBoard needs Metal, so SpringBoard draws pure black where the wallpaper should be; SwapEnd
+ * shows this image under every pure-black pixel instead. fix-xcode16.sh fills in the path. */
+#define DF_WALL_W 540
+#define DF_WALL_H 1200
+__asm__(".section __TEXT,__const\n"
+        ".p2align 6\n"
+        ".globl _df_wall_px\n"
+        "_df_wall_px:\n"
+        ".incbin \"@DF_WALL_PATH@\"\n"
+        ".text\n");
+extern "C" const uint32_t df_wall_px[DF_WALL_W * DF_WALL_H];
+
 static void df_flush_fb(void) {
   if (df_wdt) {
     df_wdt[0x08 / 4] = 0x1971; /* WDT_RST reload */
@@ -616,21 +629,33 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     uint32_t nonzero = 0;
     if (g_sw_fb_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
-      for (size_t i = 0; i < n; i++) {
-        uint32_t px = g_sw_fb_kva[i];
-        if (px != 0) {
-          nonzero++;
-          if ((px & 0x00ffffffU) != 0) {
-            nonblack++;
+      if (!g_boot_logo_done || s_swap_cnt <= 10) {
+        for (size_t i = 0; i < n; i++) {
+          uint32_t px = g_sw_fb_kva[i];
+          if (px != 0) {
+            nonzero++;
+            if ((px & 0x00ffffffU) != 0) {
+              nonblack++;
+            }
           }
         }
-      }
-      if (nonblack > 2000) {
-        g_boot_logo_done = 1;
+        if (nonblack > 2000) {
+          g_boot_logo_done = 1;
+        }
       }
       if (g_boot_logo_done) {
-        for (size_t i = 0; i < n; i++) {
-          df_fbva[i] = g_sw_fb_kva[i] | 0xff000000U;
+        /* one pass: copy frame, pure-black pixels show the wallpaper (2x upscale) */
+        const uint32_t *src = g_sw_fb_kva;
+        volatile uint32_t *dst = df_fbva;
+        for (uint32_t y = 0; y < DF_MFB_H; y++) {
+          const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
+          for (uint32_t x = 0; x < DF_MFB_W; x++) {
+            uint32_t px = *src++;
+            if ((px & 0x00ffffffU) == 0) {
+              px = wrow[x >> 1];
+            }
+            *dst++ = px | 0xff000000U;
+          }
         }
       }
     }

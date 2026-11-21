@@ -224,10 +224,10 @@ struct xnu_payload {
 #define PAGE16K(x)    (((x) + 0x3fffull) & ~0x3fffull)
 /* shortcut: XNU gets one contiguous RAM range from physBase up to just below the framebuffer;
  * MTK reserved carve-outs (TEE/ATF/modem) inside it are not excluded yet. Feed them via the ADT once XNU gets that far. */
-#define XNU_RAM_END   0x7c000000ull
+#define XNU_RAM_END   0x100000000ull
 #define XNU_SAFE_RAM  0x8000000ull   /* minimum handed to XNU; see boot_xnu() */
-#define XNU_ATF_BASE  0x70000000ull  /* RAM scan: something rewrites 0x70000000..0x76000000; XNU RAM stops below it */
-#define XNU_RAM_LO    0x4ce60000ull  /* RAM scan: 0x4ce00000..0x4ce60000 is rewritten live; XNU RAM starts above it */
+#define XNU_ATF_BASE  0x100000000ull /* 1024 MB verified clean DRAM (0xc0004000..0x100000000), above 0xa8000000..0xb8000000 hole */
+#define XNU_RAM_LO    0xc0000000ull  /* verified clean above MTK EMI hole at 0xa8000000..0xb8000000 */
 
 extern void xnu_jump(uint64_t entry_phys, uint64_t boot_args_phys);
 extern char exc_vectors[];
@@ -489,6 +489,35 @@ void heartbeat_main(uint64_t fdt_addr) {
     uint64_t initrd = 0;
     fdt_u64((const uint8_t *)fdt_addr, "chosen", "linux,initrd-start", &initrd);
     fbcon_puts("initrd: "); fbcon_hex(initrd); fbcon_putc('\n');
+#ifdef SHOW_MEMMAP
+    fbcon_puts("\n--- R/W + alias probe (128MB steps) ---\n");
+    /* Check each 128 MB block from 0x80000000..0x240000000 (7 GB):
+     * 1. Write unique pattern at +0x4000, +0x2000000, +0x4000000, +0x6000000
+     * 2. Verify readback + verify it didn't alias onto 0x4d004000 or 0x80004000 */
+    for (uint64_t a = 0x80000000ull; a < 0x240000000ull; a += 0x8000000ull) {
+        int ok = 1;
+        static const uint64_t offs[4] = { 0x4000, 0x2000000, 0x4000000, 0x6000000 };
+        uint64_t saved[4], pat[4];
+        for (int k = 0; k < 4; k++) {
+            volatile uint64_t *p = (volatile uint64_t *)(a + offs[k]);
+            saved[k] = *p;
+            pat[k] = 0x5a5aa5a512345678ull ^ (a + offs[k]);
+            *p = pat[k];
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+        for (int k = 0; k < 4; k++) {
+            volatile uint64_t *p = (volatile uint64_t *)(a + offs[k]);
+            if (*p != pat[k]) ok = 0;
+            *p = saved[k];
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+        fbcon_puts("  "); fbcon_hex(a);
+        fbcon_puts(ok ? " OK" : " BAD");
+        if (((a >> 27) & 1) == 1) fbcon_putc('\n');
+    }
+    fbcon_puts("\nDone. Hold VolDown+Pow for Fastboot.\n");
+    idle_forever(60);
+#endif
 #ifdef SHOW_RESERVED
     /* One-off diagnostic: XNU's zone setup sees its stack change under it; list what LK reserved in
      * the low 512 MB (XNU gets 0x41004000 + 128 MB) and stop here instead of booting XNU. */

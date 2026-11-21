@@ -442,22 +442,20 @@ dfu_thread(void *arg, int wr)
 	(void)wr;
 	unsigned ticks = 0;
 	for (;;) {
-		int s = ml_set_interrupts_enabled(0);
 		dfu_in_poll = 1;
 		dfu_poll();
 		dfu_in_poll = 0;
 		__asm__ volatile("mrs %0, CNTVCT_EL0" : "=r"(dfu_last_poll_cnt));
-		ml_set_interrupts_enabled(s);
 		if (dfu_configured && df_wdt) {
 			df_wdt[0x08 / 4] = 0x1971;      /* host attached: keep the watchdog fed */
 		}
-		if ((++ticks % 5000) == 1) {
+		if ((++ticks % 500) == 1) {
 			dfu_hex("fire usb: power", dfu_r8(M_POWER));
 			dfu_hex("devctl", dfu_r8(M_DEVCTL));
 			dfu_hex("faddr", dfu_r8(M_FADDR));
 			df_ps_puts(dfu_configured ? "configured\n" : "not configured\n");
 		}
-		IOSleep(1);
+		IOSleep(10);
 	}
 }
 

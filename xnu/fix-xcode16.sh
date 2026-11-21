@@ -606,11 +606,22 @@ df_irq_stat(uint32_t id)
 	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(ctl));
 	__asm__ volatile ("mrs %0, CNTV_TVAL_EL0" : "=r"(tval));
 	extern int df_gui_active;
-	if (!df_gui_active && (id == 27 || id == 30) && df_cons_last) {   /* hang report during boot: where the interrupted CPU was, every 5 s of silence */
+	if ((id == 27 || id == 30) && df_fbva) {
+		static uint32_t df_hb_tick;
+		if ((++df_hb_tick % 10) == 0) {
+			uint32_t col = (df_hb_tick & 16) ? 0xff00ff00u : 0xff0000ffu;
+			for (unsigned y = 60; y < 76; y++) {
+				volatile uint32_t *row = &df_fbva[y * (4320 / 4)];
+				for (unsigned x = 0; x < 16; x++) row[x] = col;
+				__asm__ volatile ("dc civac, %0" :: "r"(row) : "memory");
+			}
+		}
+	}
+	if ((id == 27 || id == 30) && df_cons_last) {   /* hang report: where the interrupted CPU was, every 8 s of silence */
 		uint64_t df_now, df_frq;
 		__asm__ volatile ("mrs %0, CNTVCT_EL0" : "=r"(df_now));
 		__asm__ volatile ("mrs %0, CNTFRQ_EL0" : "=r"(df_frq));
-		if (df_frq && df_now - df_cons_last > 5 * df_frq) {
+		if (df_frq && df_now - df_cons_last > 8 * df_frq) {
 			extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps;
 			extern vm_offset_t vm_kernel_slide;
 			uint64_t df_v[14];

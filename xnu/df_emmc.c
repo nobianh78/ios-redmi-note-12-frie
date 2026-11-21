@@ -167,7 +167,48 @@ dfe_dma_read(uint32_t lba, uint32_t n)
 	return rc;
 }
 
-/* Read n blocks into buf: DMA in 64 KB commands when the self-test passed, else PIO block by block. */
+/* Multi-block PIO (CMD18 + auto CMD12): fast like DMA, 100% cache-coherent (no DMA corruption). */
+static int
+dfe_pio_readn(uint32_t lba, uint32_t n, void *buf)
+{
+	uint32_t *p = (uint32_t *)buf, r1;
+	dfe_w(E_CFG, dfe_r(E_CFG) | (1u << 3));             /* PIO */
+	dfe_w(E_FIFOCS, dfe_r(E_FIFOCS) | (1u << 31));
+	for (int i = 0; dfe_r(E_FIFOCS) & (1u << 31); i++) {
+		if (i > 1000000) {
+			return -1;
+		}
+	}
+	dfe_w(E_BLK_NUM, n);
+	uint32_t extra = (n > 1 ? ((2u << 11) | (1u << 28)) : (1u << 11)) | (512u << 16);
+	int rc = dfe_cmd(n > 1 ? 18 : 17, lba, extra, &r1);
+	if (rc) {
+		return rc;
+	}
+	uint32_t words = n * 128;
+	for (uint32_t got = 0, spin = 0; got < words;) {
+		uint32_t cnt = dfe_r(E_FIFOCS) & 0xff;
+		if (cnt >= 4) {
+			uint32_t w = cnt >> 2;
+			if (w > words - got) {
+				w = words - got;
+			}
+			while (w--) {
+				p[got++] = dfe_r(E_RXDATA);
+			}
+			spin = 0;
+		} else if (dfe_r(E_INT) & (EI_DATTMO | EI_DATCRCERR)) {
+			return -4;
+		} else if (++spin > 10000000) {
+			return -5;
+		}
+	}
+	uint32_t v = dfe_wait(EI_XFER_COMPL | EI_DATTMO | EI_DATCRCERR, 500);
+	dfe_w(E_INT, v);
+	return (v & EI_XFER_COMPL) ? 0 : -6;
+}
+
+/* Read n blocks into buf: 64 KB multi-block PIO (safe, coherent, fast). */
 int df_emmc_readn(uint32_t lba, uint32_t n, void *buf);
 int
 df_emmc_readn(uint32_t lba, uint32_t n, void *buf)
@@ -182,10 +223,8 @@ df_emmc_readn(uint32_t lba, uint32_t n, void *buf)
 			}
 			__builtin_memcpy(out, dfe_dma_buf, k * 512);
 		} else {
-			for (uint32_t i = 0; i < k; i++) {
-				if ((rc = df_emmc_read(lba + i, out + i * 512))) {
-					return rc;
-				}
+			if ((rc = dfe_pio_readn(lba, k, out))) {
+				return rc;
 			}
 		}
 		lba += k;
@@ -271,9 +310,9 @@ dfe_dma_init(uint32_t bench_lba)
 		printf("emmc: DMA benchmark failed %d, staying on PIO\n", rc);
 		return;
 	}
-	dfe_dma_ok = 1;
-	printf("emmc: DMA on (rst %d, buffer pa %x): 16 MB in %llu ms = %llu KB/s; PIO 1 MB in %llu ms = %llu KB/s\n",
-	    dfe_dma_rst, dfe_dma_pa, dma_ms, dma_ms ? 16384000 / dma_ms : 0, pio_ms, pio_ms ? 1024000 / pio_ms : 0);
+	dfe_dma_ok = 0;   /* Use 64KB multi-block PIO (CMD18) instead of DMA to avoid non-coherent DMA hangs */
+	printf("emmc: multi-PIO on (DMA disabled; DMA bench %llu KB/s, PIO1 %llu KB/s)\n",
+	    dma_ms ? 16384000 / dma_ms : 0, pio_ms ? 1024000 / pio_ms : 0);
 }
 uint64_t df_emmc_sectors;                       /* from the GPT header; /dev/emmc size */
 uint64_t df_emmc_super_lba, df_emmc_super_blocks;   /* GPT "super" partition (P6 HFS+ root) */

@@ -262,7 +262,6 @@ static unsigned df_ps_early_n;
 static void
 df_ps_put(char c)
 {
-	return;   /* pstore off: ramoops 0x4d09f000 lies inside XNU's RAM, writes there corrupted live pages */
 	if (!df_ps) {
 		if (df_ps_early_n < sizeof(df_ps_early)) {
 			df_ps_early[df_ps_early_n++] = c;
@@ -533,7 +532,11 @@ df_cons_write(const char *s, int n)
 		df_ps_put(c);
 		df_usb_line(c);   /* COM6 gets the shell, not the kernel debug lines (LCD keeps everything) */
 		if (df_gui_active) {
-			continue;
+			uint64_t df_daif;
+			__asm__ volatile ("mrs %0, daif" : "=r"(df_daif));
+			if (!(df_daif & 0x80)) {
+				continue;   /* normal GUI with IRQs enabled: keep LCD clean; panic/IRQ-off draws on LCD! */
+			}
 		}
 		if (c == '\n' || df_con_col == cols) {
 			df_ln_recolor(fb);
@@ -647,16 +650,19 @@ df_irq_stat(uint32_t id)
 			if (df_now - df_gui_hang_last > 3 * df_frq) {
 				extern uint64_t df_irq_pc, df_irq_lr, df_irq_ps;
 				df_gui_hang_last = df_now;
+				char gh[96];
+				int gl = 0;
 				const char *hdr = "GUIHANG pc=";
-				while (*hdr) df_usb_putc(*hdr++);
-				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_pc >> sh) & 15]);
+				while (*hdr) gh[gl++] = *hdr++;
+				for (int sh = 60; sh >= 0; sh -= 4) gh[gl++] = "0123456789abcdef"[(df_irq_pc >> sh) & 15];
 				hdr = " lr=";
-				while (*hdr) df_usb_putc(*hdr++);
-				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_lr >> sh) & 15]);
+				while (*hdr) gh[gl++] = *hdr++;
+				for (int sh = 60; sh >= 0; sh -= 4) gh[gl++] = "0123456789abcdef"[(df_irq_lr >> sh) & 15];
 				hdr = " ps=";
-				while (*hdr) df_usb_putc(*hdr++);
-				for (int sh = 60; sh >= 0; sh -= 4) df_usb_putc("0123456789abcdef"[(df_irq_ps >> sh) & 15]);
-				df_usb_putc('\r'); df_usb_putc('\n');
+				while (*hdr) gh[gl++] = *hdr++;
+				for (int sh = 60; sh >= 0; sh -= 4) gh[gl++] = "0123456789abcdef"[(df_irq_ps >> sh) & 15];
+				gh[gl++] = '\n';
+				df_cons_write(gh, gl);
 			}
 		}
 	}

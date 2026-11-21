@@ -375,28 +375,30 @@ dfu_ep0_irq(void)
 }
 
 static void
-dfu_bulk(void)
+dfu_bulk(int in_irq)
 {
-	/* OUT: host -> console input */
-	dfu_w8(M_INDEX, 2);
-	uint16_t rx = dfu_r16(M_RXCSR);
-	if (rx & RXCSR_RXPKTRDY) {
-		uint8_t buf[512];
-		unsigned n = dfu_r16(M_COUNT) & 0x1fff;
-		if (n > sizeof(buf)) {
-			n = sizeof(buf);
-		}
-		dfu_fifo_read(2, buf, n);
-		dfu_w16(M_RXCSR, rx & (uint16_t)~RXCSR_RXPKTRDY);
-		dfu_w8(M_INDEX, 0);
-		for (unsigned i = 0; i < n; i++) {
-			if (buf[i] == 0x12) {           /* Ctrl-R: reset the phone (TOPRGU WDT_SWRST) */
-				df_ps_puts("fire usb: Ctrl-R reset\n");
-				if (df_wdt) {
-					df_wdt[0x14 / 4] = 0x1209;
-				}
+	/* OUT: host -> console input (never call cons_cinput from IRQ context — takes TTY locks!) */
+	if (!in_irq) {
+		dfu_w8(M_INDEX, 2);
+		uint16_t rx = dfu_r16(M_RXCSR);
+		if (rx & RXCSR_RXPKTRDY) {
+			uint8_t buf[512];
+			unsigned n = dfu_r16(M_COUNT) & 0x1fff;
+			if (n > sizeof(buf)) {
+				n = sizeof(buf);
 			}
-			cons_cinput(buf[i] == '\r' ? '\n' : (char)buf[i]);
+			dfu_fifo_read(2, buf, n);
+			dfu_w16(M_RXCSR, rx & (uint16_t)~RXCSR_RXPKTRDY);
+			dfu_w8(M_INDEX, 0);
+			for (unsigned i = 0; i < n; i++) {
+				if (buf[i] == 0x12) {           /* Ctrl-R: reset the phone (TOPRGU WDT_SWRST) */
+					df_ps_puts("fire usb: Ctrl-R reset\n");
+					if (df_wdt) {
+						df_wdt[0x14 / 4] = 0x1209;
+					}
+				}
+				cons_cinput(buf[i] == '\r' ? '\n' : (char)buf[i]);
+			}
 		}
 	}
 	/* IN: console output -> host, one packet at a time */
@@ -417,7 +419,7 @@ dfu_bulk(void)
 }
 
 static void
-dfu_poll(void)
+dfu_poll(int in_irq)
 {
 	uint8_t usb = dfu_r8(M_INTRUSB);
 	uint16_t txi = dfu_r16(M_INTRTX);
@@ -440,7 +442,7 @@ dfu_poll(void)
 		dfu_ep0_irq();
 	}
 	if (dfu_configured) {
-		dfu_bulk();
+		dfu_bulk(in_irq);
 	}
 }
 
@@ -450,7 +452,7 @@ dfu_poll_irq(void)
 {
 	if (dfu && dfu_configured && !dfu_in_poll) {
 		dfu_in_poll = 1;
-		dfu_poll();
+		dfu_poll(1);
 		dfu_in_poll = 0;
 	}
 }
@@ -463,7 +465,7 @@ dfu_thread(void *arg, int wr)
 	unsigned ticks = 0;
 	for (;;) {
 		dfu_in_poll = 1;
-		dfu_poll();
+		dfu_poll(0);
 		dfu_in_poll = 0;
 		__asm__ volatile("mrs %0, CNTVCT_EL0" : "=r"(dfu_last_poll_cnt));
 		if (dfu_configured && df_wdt) {

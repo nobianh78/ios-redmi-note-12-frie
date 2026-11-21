@@ -594,10 +594,14 @@ unsigned df_bb_n;
 void
 df_bb_sample(uint64_t pc, uint64_t lr)
 {
-	const char *n = proc_best_name(current_proc());
+	proc_t p = current_proc();
+	if (!p) {
+		return;
+	}
+	const char *n = proc_best_name(p);
 	if (n && strcmp(n, "backboardd") == 0) {
 		extern void *df_bb_task;
-		df_bb_task = (void *)proc_task(current_proc());
+		df_bb_task = (void *)proc_task(p);
 		unsigned i = df_bb_n++ & 63;
 		df_bb_ring[i][0] = pc;
 		df_bb_ring[i][1] = lr;

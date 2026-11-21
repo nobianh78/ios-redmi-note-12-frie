@@ -219,14 +219,20 @@ grep -q '^	DF_MARK_C 4$' "$start_s" || { echo "fix-xcode16: DF_MARK_C 4 not inse
 #     c. C breadcrumbs in arm_init() (TTBR0 still holds the V=P tables until arm_vm_init()).
 cat >> "$src/osfmk/arm64/amcc_rorgn_common.c" <<'EOF'
 
-/* fire bring-up breadcrumb for C code running on the bootstrap V=P tables (see start.s DF_MARK). */
+/* The framebuffer is first reached through the V=P block (TTBR0). Once a user task runs, TTBR0 holds
+ * that task's tables and the V=P address is gone. initialize_screen() (video_console.c) io_maps the
+ * same framebuffer into the kernel (TTBR1) and stores that address here; df_mark() MUST use df_fbva
+ * so panic_trap_to_debugger() -> df_mark(13) does not double-fault on unmapped TTBR0 0x7ce6a000! */
+volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
+
+/* fire bring-up breadcrumb for C code (uses df_fbva: V=P before initialize_screen, TTBR1 after). */
 void df_mark(int n);
 void
 df_mark(int n)
 {
 	/* the V=P tables get rebuilt in arm_vm_init: drop any stale TLB entry for the framebuffer block */
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
-	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(0x7ce6a000ULL + (1300ULL + (uint64_t)n * 60) * 4320);
+	volatile uint32_t *p = df_fbva + (1300ULL + (uint64_t)n * 60) * (4320 / 4);
 	for (int i = 0; i < (40 * 4320) / 4; i++) {
 		p[i] = (uint32_t)(uintptr_t)&p[i];
 	}
@@ -237,11 +243,6 @@ df_mark(int n)
 }
 
 #include "df_font8x8.h"
-/* The framebuffer is first reached through the V=P block (TTBR0). Once a user task runs, TTBR0 holds
- * that task's tables and the V=P address is gone. initialize_screen() (video_console.c) io_maps the
- * same framebuffer into the kernel (TTBR1) and stores that address here; a second 10 MB io_map of
- * our own does not fit in the io space (kmem_alloc ... failed with 3). */
-volatile uint32_t *df_fbva = (volatile uint32_t *)(uintptr_t)0x7ce6a000ULL;
 /* MT6768 TOPRGU watchdog, armed (31 s) by the heartbeat loader; mapped next to the framebuffer in
  * initialize_screen(). Restarted on every console line: silence for 31 s (hang, panic) reboots. */
 volatile uint32_t *df_wdt;
@@ -356,15 +357,16 @@ df_ps_attach(void)
 	}
 }
 
-/* fire bring-up: print a panic string (2x 8x8 font, white on black) at the bottom of the L3 layer. */
+/* fire bring-up: print a panic/fault string on L3 (above df_mark(13) bar) AND flush over COM6 USB. */
+void df_usb_putc(char c);
 void df_puts(const char *s, unsigned long caller);
 void
 df_puts(const char *s, unsigned long caller)
 {
 	__asm__ volatile ("dsb ishst; tlbi vmalle1; dsb ish; isb" ::: "memory");
 	volatile uint32_t *fb = df_fbva;
-	/* 1x 8x8 font, 9px lines: 135 cols x 46 rows, room for the full arm64 register dump */
-	const unsigned pitch = 4320 / 4, top = 2040, bottom = 2460, cols = 1080 / 8;
+	/* 1x 8x8 font, 9px lines: 135 cols x 50 rows at y=1600..2060 (above df_mark(13) at y=2080..2120) */
+	const unsigned pitch = 4320 / 4, top = 1600, bottom = 2060, cols = 1080 / 8;
 	char hex[26] = "caller 0x";
 	for (int i = 0; i < 16; i++) {
 		hex[9 + i] = "0123456789abcdef"[(caller >> (60 - 4 * i)) & 0xf];
@@ -377,7 +379,7 @@ df_puts(const char *s, unsigned long caller)
 	df_ps_puts("\n");
 	for (unsigned y = top; y < bottom; y++) {
 		for (unsigned x = 0; x < 1080; x++) {
-			fb[y * pitch + x] = 0xff000000;
+			fb[y * pitch + x] = 0xff300000;   /* dark red banner so any panic is impossible to miss */
 		}
 	}
 	unsigned col = 0, row = 0;
@@ -401,6 +403,28 @@ df_puts(const char *s, unsigned long caller)
 		__asm__ volatile ("dc civac, %0" :: "r"(a) : "memory");
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
+	const char *pfx = "\r\n*** DF_PUTS ***\r\n";
+	for (const char *p = pfx; *p; p++) { df_usb_putc(*p); }
+	for (const char *p = s; *p; p++) { if (*p == '\n') df_usb_putc('\r'); df_usb_putc(*p); }
+	df_usb_putc('\r'); df_usb_putc('\n');
+	for (const char *p = hex; *p; p++) { df_usb_putc(*p); }
+	df_usb_putc('\r'); df_usb_putc('\n');
+}
+void df_fault_dump(const char *tag, uint32_t esr, uint64_t far, uint64_t pc, uint64_t lr);
+void
+df_fault_dump(const char *tag, uint32_t esr, uint64_t far, uint64_t pc, uint64_t lr)
+{
+	char buf[160];
+	int o = 0;
+	while (*tag && o < 32) { buf[o++] = *tag++; }
+	const char *lbl[4] = { " esr=", " far=", " pc=", " lr=" };
+	uint64_t val[4] = { (uint64_t)esr, far, pc, lr };
+	for (int k = 0; k < 4; k++) {
+		for (const char *p = lbl[k]; *p; p++) { buf[o++] = *p; }
+		for (int sh = 60; sh >= 0; sh -= 4) { buf[o++] = "0123456789abcdef"[(val[k] >> sh) & 15]; }
+	}
+	buf[o] = 0;
+	df_puts(buf, (unsigned long)pc);
 }
 
 /*
@@ -624,18 +648,13 @@ df_irq_stat(uint32_t id)
 		if (df_frq && df_now - df_cons_last > 8 * df_frq) {
 			extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps;
 			extern vm_offset_t vm_kernel_slide;
-			uint64_t df_v[14];
+			uint64_t df_v[5];
 			int df_k = 0;
-			uint64_t df_fp = df_irq_fp;
 			df_v[df_k++] = df_irq_pc;
 			df_v[df_k++] = df_irq_lr;
 			df_v[df_k++] = df_irq_ps;
 			df_v[df_k++] = (uint64_t)vm_kernel_slide;
-			for (int df_i = 0; df_i < 10 && df_fp && (df_fp >> 40) == 0xffffffull && !(df_fp & 7); df_i++) {
-				uint64_t *df_f = (uint64_t *)df_fp;
-				df_v[df_k++] = df_f[1];
-				df_fp = df_f[0];
-			}
+			df_v[df_k++] = df_irq_fp;   /* print fp safely without dereferencing unmapped kernel stacks in IRQ! */
 			char df_b[24];
 			df_cons_write("HANG pc/lr/cpsr/slide/frames:\n", 31);
 			for (int df_i = 0; df_i < df_k; df_i++) {   /* no snprintf in this file: hand-made hex */
@@ -1381,8 +1400,8 @@ cat "$(dirname "$0")/df_thdump.c" >> "$sleh_c"   # fix-xcode16 P6: backboardd th
 perl -0pi -e 's|(#if USE_APPLEARMSMP\n)\tPE_handle_ext_interrupt\(\);\n#else|$1\t{ /* fix-xcode16: fire GICv3 Group 1 IRQs */\n\t\textern void df_irq_stat(uint32_t);\n\t\tuint64_t df_iar = __builtin_arm_rsr64("ICC_IAR1_EL1");\n\t\tuint32_t df_id = (uint32_t)(df_iar & 0xffffff);\n\t\t{ extern uint64_t df_irq_pc, df_irq_lr, df_irq_fp, df_irq_ps; df_irq_pc = get_saved_state_pc(state); df_irq_lr = get_saved_state_lr(state); df_irq_fp = get_saved_state_fp(state); df_irq_ps = get_saved_state_cpsr(state); if ((df_irq_ps \& 0x1f) == 0) { extern void df_bb_sample(uint64_t, uint64_t); df_bb_sample(df_irq_pc, df_irq_lr); } }\n\t\tdf_irq_stat(df_id);\n\t\tif (df_id == 27 \|\| df_id == 30) {\n\t\t\tcdp->cpu_decrementer = -1; /* Large */\n\t\t\trtclock_intr(TRUE);\n\t\t}\n\t\t/* shortcut: device IRQs are acked and dropped until an IOKit GIC driver exists */\n\t\tif (df_id < 1020) {\n\t\t\t__builtin_arm_wsr64("ICC_EOIR1_EL1", df_iar);\n\t\t\t/* fire: ICC_CTLR_EL1.EOImode stays 1 (firmware-owned); EOIR then only drops priority, so deactivate explicitly */\n\t\t\tif (__builtin_arm_rsr64("ICC_CTLR_EL1") & 0x2) {\n\t\t\t\t__builtin_arm_wsr64("ICC_DIR_EL1", df_iar);\n\t\t\t}\n\t\t\t__builtin_arm_isb(ISB_SY);\n\t\t}\n\t\tdf_irq_stat(0xffffffffu);\n\t}\n#else|' "$sleh_c"
 grep -q 'fire GICv3 Group 1 IRQs' "$sleh_c" || { echo "fix-xcode16: sleh_irq GIC path not inserted"; grep -n -A3 'USE_APPLEARMSMP' "$sleh_c"; exit 1; }
 #        Log EL0 exceptions (SVC = syscalls of PID 1, aborts = its faults)
-perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ if (!PSR64_IS_USER(get_saved_state_cpsr(state)) && class != 0x24 && class != 0x25) { extern void df_puts(const char *, unsigned long); df_puts("EL1 SYNC FAULT", get_saved_state_pc(state)); } } { static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && class != 0x15 && ((class != 0x20 && class != 0x24) \|\| (far >> 48) != 0 \|\| far < 0x10000)) { df_n++; /* screen filter: real faults only, not SVC or demand paging */ printf("SEGV el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) { extern int proc_selfpid(void); uint32_t df_sl = 0; vm_shared_region_t df_sr = vm_shared_region_get(current_task()); if (df_sr) { df_sl = df_sr->sr_slide; vm_shared_region_deallocate(df_sr); } printf("SEGV regs pid %d slide 0x%x x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", proc_selfpid(), df_sl, (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class == 0x3c) { for (int df_r = 0; df_r < 4; df_r++) { char df_s[160]; size_t df_n = 0; int df_e = copyinstr((user_addr_t)saved_state64(state)->x[df_r], df_s, sizeof(df_s), \&df_n); if (df_e == 0 \|\| df_n > 8) { df_s[sizeof(df_s) - 1] = 0; printf("BRK x%d: %s\\n", df_r, df_s); } } } } if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"
-perl -0pi -e 's|(\nsleh_serror\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n)|$1\t{ extern void df_puts(const char *, unsigned long); df_puts("SERROR FAULT", get_saved_state_pc(&context->ss)); } /* fix-xcode16 */\n|' "$sleh_c"
+perl -0pi -e 's|(\nsleh_synchronous\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n[^\n]*\n\tarm_saved_state_t\s+\* state\s+= &context->ss;\n)|$1\t{ if (!PSR64_IS_USER(get_saved_state_cpsr(state)) && ((class != 0x24 && class != 0x25) \|\| ((class == 0x25 \|\| class == 0x21) && (far >> 48) != 0))) { extern void df_fault_dump(const char *, uint32_t, uint64_t, uint64_t, uint64_t); df_fault_dump("EL1 FAULT", esr, (uint64_t)far, get_saved_state_pc(state), get_saved_state_lr(state)); } } { static int df_n; if (PSR64_IS_USER(get_saved_state_cpsr(state)) && class != 0x15 && ((class != 0x20 && class != 0x24) \|\| (far >> 48) != 0 \|\| far < 0x10000)) { df_n++; /* screen filter: real faults only, not SVC or demand paging */ printf("SEGV el0#%d ec=0x%x esr=0x%x far=0x%llx pc=0x%llx x16=%llu\\n", df_n, (unsigned)class, esr, (unsigned long long)far, (unsigned long long)get_saved_state_pc(state), (unsigned long long)saved_state64(state)->x[16]); if (class != 0x15) { extern int proc_selfpid(void); uint32_t df_sl = 0; vm_shared_region_t df_sr = vm_shared_region_get(current_task()); if (df_sr) { df_sl = df_sr->sr_slide; vm_shared_region_deallocate(df_sr); } printf("SEGV regs pid %d slide 0x%x x19=0x%llx sp=0x%llx lr=0x%llx x0=0x%llx\\n", proc_selfpid(), df_sl, (unsigned long long)saved_state64(state)->x[19], (unsigned long long)saved_state64(state)->sp, (unsigned long long)saved_state64(state)->lr, (unsigned long long)saved_state64(state)->x[0]); if (class == 0x3c) { for (int df_r = 0; df_r < 4; df_r++) { char df_s[160]; size_t df_n = 0; int df_e = copyinstr((user_addr_t)saved_state64(state)->x[df_r], df_s, sizeof(df_s), \&df_n); if (df_e == 0 \|\| df_n > 8) { df_s[sizeof(df_s) - 1] = 0; printf("BRK x%d: %s\\n", df_r, df_s); } } } } if (class != 0x15 && (far >> 48) != 0) { extern uint64_t df_dyld_base; df_dyld_base = (saved_state64(state)->x[19] & ~0x3fffull) - 0x8c000; } } } /* fix-xcode16 */\n|' "$sleh_c"
+perl -0pi -e 's|(\nsleh_serror\(arm_context_t \*context, uint32_t esr, vm_offset_t far\)\n\{\n)|$1\t{ extern void df_fault_dump(const char *, uint32_t, uint64_t, uint64_t, uint64_t); df_fault_dump("SERROR", esr, (uint64_t)far, get_saved_state_pc(&context->ss), get_saved_state_lr(&context->ss)); } /* fix-xcode16 */\n|' "$sleh_c"
 perl -0pi -e 's|(#include <vm/vm_kern.h>\n)|$1#include <vm/vm_shared_region.h> /* fix-xcode16: slide for the SEGV report */\n|' "$sleh_c"
 #        sleh.c handle_user_abort: report only user faults the VM could NOT resolve (COW faults are normal).
 perl -0pi -e 's{(\n\t\tcodes\[0\] = result;\n\t\} else if \(is_alignment_fault\(fault_code\)\) \{)}{\n\t\tif (result != KERN_SUCCESS) { extern int proc_selfpid(void); printf("UFAULT pid %d kr %d far 0x%llx pc 0x%llx lr 0x%llx x22 0x%llx x24 0x%llx\\n", proc_selfpid(), result, (unsigned long long)fault_addr, (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state), (unsigned long long)saved_state64(state)->x[22], (unsigned long long)saved_state64(state)->x[24]); } /* fix-xcode16 */$1}' "$sleh_c"
@@ -1554,6 +1573,6 @@ test "$(cat "$src/iokit/bsddev/IOKitBSDInit.cpp" "$src/iokit/Kernel/IOUserClient
 #        came out as blue stripes, so something later in the panic path draws over it.
 dbg_c="$(dirname "$arm_init")/../kern/debug.c"
 #        Still 11 + 13 after the L3 prealloc: print the panic string itself at the screen bottom.
-perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\tdf_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); static char df_b[3072]; strlcpy(df_b, "PANIC: ", sizeof(df_b)); if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); for (;;) { __asm__ volatile ("wfe"); } }\n|' "$dbg_c"
+perl -0pi -e 's|^|extern void df_mark(int); extern void df_puts(const char *, unsigned long); /* fix-xcode16: fire bring-up */\n|; s|(\npanic_trap_to_debugger\([^{]*\{\n#pragma clang diagnostic pop\n)|$1\t{ static volatile int df_in_panic = 0; if (df_in_panic++) { for (;;) { __asm__ volatile ("wfe"); } } } df_mark(13);\n\t{ extern int vsnprintf(char *, size_t, const char *, va_list); static char df_b[3072]; strlcpy(df_b, "PANIC: ", sizeof(df_b)); if (panic_args) { va_list df_c; va_copy(df_c, *panic_args); vsnprintf(df_b + 7, sizeof(df_b) - 7, panic_format_str, df_c); va_end(df_c); } else { strlcpy(df_b + 7, panic_format_str, sizeof(df_b) - 7); } df_puts(df_b, panic_caller); for (;;) { __asm__ volatile ("wfe"); } }\n|' "$dbg_c"
 grep -q 'df_mark(13);' "$dbg_c" || { echo "fix-xcode16: expected df_mark 13 in debug.c"; exit 1; }
 echo "fix-xcode16: kept V=P after arm_vm_init, df_mark 9-12"

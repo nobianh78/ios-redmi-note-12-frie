@@ -251,11 +251,14 @@ df_mali_probe(void)
 #define JS_CONFIG_NEXT    0x58
 #define JS_COMMAND_NEXT   0x60
 
+extern vm_offset_t ml_vtophys(vm_offset_t);
+extern uint64_t mach_absolute_time(void);
+
 /* one 16 KB kernel page, physically contiguous: L1 | L2 A | L2 B | jobs + results */
 static uint8_t dfm_mem[0x4000] __attribute__((aligned(0x4000)));
 
 static void
-dfm_clean(const void *p, size_t len)
+dfm_clean(const void *p, uint64_t len)
 {
 	uintptr_t a = (uintptr_t)p & ~63UL, e = (uintptr_t)p + len;
 	for (; a < e; a += 64) {
@@ -297,7 +300,9 @@ df_mali_hello(void)
 	if (!base_pa) {
 		return;
 	}
-	bzero(dfm_mem, sizeof(dfm_mem));
+	for (unsigned i = 0; i < sizeof(dfm_mem); i++) {
+		dfm_mem[i] = 0;
+	}
 	dfm_map_gb(l1, l2a, base_pa + 0x1000, base_pa);                 /* our page's GB */
 	if ((0x7ce6a000ULL >> 30) != (base_pa >> 30)) {
 		dfm_map_gb(l1, l2b, base_pa + 0x2000, 0x7ce6a000ULL);   /* framebuffer GB */

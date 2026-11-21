@@ -293,6 +293,18 @@ bool IOMobileFramebuffer::start(IOService *provider) {
   setProperty("IOMFBSupportsPBuffer", kOSBooleanTrue);
   setProperty("is-main-display", kOSBooleanTrue);
   setProperty("display-type", "LCD");
+  if (!g_sw_fb_md) {
+    g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
+        (vm_size_t)DF_MFB_W * DF_MFB_H * 4, page_size);
+    if (g_sw_fb_md) {
+      g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
+      if (g_sw_fb_kva) {
+        bzero(g_sw_fb_kva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+      }
+      printf("mfb: pre-allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
+    }
+  }
   registerService();
   printf("mfb: IOMobileFramebuffer %dx%d at 0x%llx registered\n", DF_MFB_W,
          DF_MFB_H, DF_MFB_PHYS);

@@ -713,6 +713,20 @@ dft_thread(void *arg __unused, int wait __unused)
 		__asm__ volatile ("mrs %0, PMCCNTR_EL0" : "=r"(c1));
 		printf("cpu: midr=0x%llx mpidr=0x%llx cntfrq=%llu pmcr=0x%llx clock=%llu MHz\n",
 		    midr, mpidr, frq, pmcr, ((c1 - c0) * frq / (t1 - t0)) / 1000000ULL);
+		/* Fallback: 16 dependent adds per iteration = 16 cycles (1-cycle ALU latency) */
+		uint64_t n = 2000000, acc = 0;
+		__asm__ volatile ("isb; mrs %0, CNTVCT_EL0" : "=r"(t0));
+		__asm__ volatile (
+			"1:\n"
+			"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
+			"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
+			"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
+			"add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n add %1, %1, #1\n"
+			"subs %0, %0, #1\n b.ne 1b\n"
+			: "+r"(n), "+r"(acc));
+		__asm__ volatile ("isb; mrs %0, CNTVCT_EL0" : "=r"(t1));
+		printf("cpu: loop clock ~%llu MHz (32M adds in %llu ticks)\n",
+		    (32000000ULL * frq / (t1 - t0)) / 1000000ULL, t1 - t0);
 	}
 	dft_hw_init();
 	int ft_ok = (dft_fts_boot() == 0);

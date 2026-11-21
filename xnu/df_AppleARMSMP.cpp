@@ -52,7 +52,7 @@ static processor_t *machProcessors;
 static ipi_handler_t df_ipi_handler;
 /* Secondary bring-up breadcrumbs: 1 arm_init_cpu entry, 2 after cpu_init, 3 PE_cpu_machine_init, 4 IPI ok */
 extern "C" { volatile unsigned int df_sec_stage; }
-static unsigned int df_max_cpus = 2;   /* raise to 6 once 2-core boot is stable */
+static unsigned int df_max_cpus = 6;   /* all six Cortex-A55 (2-core boot verified on fire) */
 
 bool cluster_power_supported = false;
 static uint64_t cpu_power_state_mask;

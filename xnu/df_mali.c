@@ -619,7 +619,7 @@ dfm_comp_build(const uint32_t *swfb)
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
-	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, 4352ULL * DFM_FB_H);   /* 1088-px pitch */
+	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, 4320ULL * DFM_FB_H);   /* viewed as 2160x1200 @ 8640 B */
 	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 544ULL * 1200 * 4);
 	e |= dfm_map_block_gb(DFM_FB_PA);
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_mem));
@@ -695,7 +695,7 @@ df_mali_compose(const uint32_t *swfb)
 
 	uint64_t t0 = mach_absolute_time();
 	/* the CPU rendered into cacheable memory; the GPU reads it non-cacheable */
-	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)4352 * DFM_FB_H; a += 64) {
+	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)4320 * DFM_FB_H; a += 64) {
 		__asm__ volatile ("dc cvac, %0" :: "r"(a) : "memory");
 	}
 	dfm_clean(dfm_mem + 0x5000, 0x800);

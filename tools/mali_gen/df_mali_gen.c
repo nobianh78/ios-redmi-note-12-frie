@@ -94,7 +94,12 @@ main(int argc, char **argv)
    } else {
    nir_def *fc = nir_load_frag_coord(&b);
    nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, fc, 2));
-   nir_def *c = txf(&b, 0, xy);
+   /* the SW frame (pitch 4320 B, not 64B aligned) is viewed as a 2160x1200 texture with an
+    * 8640 B pitch: texture row r holds screen rows 2r and 2r+1 side by side */
+   nir_def *sx = nir_channel(&b, xy, 0), *sy = nir_channel(&b, xy, 1);
+   nir_def *txy = nir_vec2(&b, nir_iadd(&b, sx, nir_imul_imm(&b, nir_iand_imm(&b, sy, 1), FB_W)),
+                           nir_ushr_imm(&b, sy, 1));
+   nir_def *c = txf(&b, 0, txy);
    nir_def *w = txf(&b, 1, nir_ushr_imm(&b, xy, 1));
    nir_def *a = nir_fmax(&b, nir_channel(&b, c, 0),
                          nir_fmax(&b, nir_channel(&b, c, 1), nir_channel(&b, c, 2)));
@@ -131,8 +136,8 @@ main(int argc, char **argv)
    /* Surfaces + textures */
    pan_pack(blob + OFF_SURF, SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = SWFB_VA;
-      cfg.row_stride = 4352;            /* SW frame pitch 1088 px: Mali needs 64-byte rows */
-      cfg.surface_stride = 4352 * FB_H;
+      cfg.row_stride = FB_W * 4 * 2;    /* 8640 B = two 4320 B screen rows (64B aligned) */
+      cfg.surface_stride = FB_W * 4 * FB_H;
    }
    pan_pack(blob + OFF_SURF + pan_size(SURFACE_WITH_STRIDE), SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = WALL_VA;
@@ -144,8 +149,8 @@ main(int argc, char **argv)
       pan_pack(blob + OFF_TEX + t * pan_size(TEXTURE), TEXTURE, cfg) {
          cfg.dimension = MALI_TEXTURE_DIMENSION_2D;
          cfg.format = bgra.hw;
-         cfg.width = t ? WALL_W : FB_W;
-         cfg.height = t ? WALL_H : FB_H;
+         cfg.width = t ? WALL_W : FB_W * 2;
+         cfg.height = t ? WALL_H : FB_H / 2;
          cfg.swizzle = 0 | (1 << 3) | (2 << 6) | (3 << 9); /* identity */
          cfg.texel_ordering = MALI_TEXTURE_LAYOUT_LINEAR;
          cfg.levels = 1;

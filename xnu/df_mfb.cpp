@@ -32,7 +32,7 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 #define DF_MFB_PHYS 0x7ce6a000ULL
 #define DF_MFB_W 1080
 #define DF_MFB_H 2400
-#define DF_MFB_STRIDE_PX 1088   /* iOS SW frame row pitch in pixels (4352 B, 64-byte aligned) */
+#define DF_MFB_STRIDE_PX 1080   /* iOS ignores a padded bytes_per_row (frame came out skewed): keep 4320 B */
 #define DF_L0_PHYS 0x7c430000ULL
 #define DF_L0_STRIDE 4352
 #define DF_L0_H 2460

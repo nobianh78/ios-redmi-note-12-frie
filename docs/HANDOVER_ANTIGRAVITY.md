@@ -59,6 +59,16 @@ iOS vẽ ở 720×1600 và để shader ghép trên GPU phóng to lên 1080×240
 ### 3. Lộ trình dài hạn: CoreAnimation trên GPU
 Xem `docs/gpu-coreanimation-roadmap.md` (G1–G5). Tham khảo kiến trúc UniXNU (Metal → `metal2vulkan` → driver Vulkan của Mesa; với Mali là PanVK) và thư mục `drivers/MaliMetal` trong repo merlinx.
 
+## Gợi ý từ https://unixnu.com/reference/ (đã lọc cho máy này)
+Trang reference không có số liệu FPS, không có khoá CoreAnimation/SpringBoard/LaunchServices; các mục dưới là phần áp dụng được:
+- **Bản vá XNU của họ đáng đối chiếu** (`/xnu/patch-reference`): `native-work-interval-soft-fail` (cho work interval của CA client thất bại "mềm" thay vì lỗi — mình mới chỉ bỏ kiểm tra `PRIV_WORK_INTERVAL`), `native-priv-work-interval`, `native-arm-pan`, `zzz-boot-progress`.
+- **Màn hình** (`/porting/display`): thuộc tính `backlight-marketing-table` ("display creation fails without it"), `IODisplayParameters.brightness`, và `scripts/appsync/BacklightMode.m` để backboardd nhận chế độ hiển thị vật lý; kiểm tra `IOMobileFramebuffer`/backlight của mình có công bố các thuộc tính này không (thiếu có thể làm backboardd coi màn hình là tắt hoặc chậm).
+- **Thời gian boot**: họ dùng `disable-watchdogd=1` và `disable-jobs=<danh sách>`; tương đương ở máy mình là `/var/db/com.apple.xpc.launchd/disabled.plist` (danh sách job trong data seed merlinx).
+- **Payload runtime `appsync = true`** (`/reference/configuration`): họ cài AppSync để LaunchServices/installd chấp nhận app không qua chữ ký App Store — liên quan trực tiếp tới việc đăng ký app.
+- **Không mật mã**: `aks-sls=3` ("no passcode") — mình đã làm tương đương bằng vá MKB.
+- **Gỡ lỗi UI**: `boot-ui-focus=SpringBoard|backboardd|Setup` + `scripts/decode-boot-ui-trace.py` (trace thời gian theo tiến trình) — có thể làm bản tương tự để đo 2–3 phút boot đang mất ở đâu.
+- Đọc tiếp nếu cần: `/guide/skip-setup`, `/guide/userdata`, `/guide/mobilegestalt`.
+
 ## Tài liệu & memory
 - `docs/gpu-coreanimation-roadmap.md`, `HANDOVER.md` (bàn giao cũ), memory Claude ở `C:\Users\AnhNobi\.claude\projects\D--Code-IOS\memory\` (đặc biệt `fire-smp-bringup.md`, `reference-unixnu-merlinx.md`).
 - Repo: `origin/main`. Mốc an toàn: các tag `v1-ios16-lockscreen-stable` … `v5-mali-compositor`.

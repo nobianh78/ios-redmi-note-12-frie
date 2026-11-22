@@ -32,6 +32,7 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 #define DF_MFB_PHYS 0x7ce6a000ULL
 #define DF_MFB_W 1080
 #define DF_MFB_H 2400
+#define DF_MFB_STRIDE_PX 1088   /* iOS SW frame row pitch in pixels (4352 B, 64-byte aligned) */
 #define DF_L0_PHYS 0x7c430000ULL
 #define DF_L0_STRIDE 4352
 #define DF_L0_H 2460
@@ -46,7 +47,7 @@ static uint32_t g_boot_bar_ticks = 0;
 /* Apple iOS 16 wallpaper (SydneyWallpaper.jpg), 540x1200 BGRA, made by tools/make_wallpaper.py.
  * PosterBoard needs Metal, so SpringBoard draws pure black where the wallpaper should be; SwapEnd
  * shows this image under every pure-black pixel instead. fix-xcode16.sh fills in the path. */
-#define DF_WALL_W 540
+#define DF_WALL_W 544   /* 2176 B rows: 64-byte aligned for the Mali */
 #define DF_WALL_H 1200
 __asm__(".section __TEXT,__const\n"
         ".p2align 6\n"
@@ -379,11 +380,11 @@ bool IOMobileFramebuffer::start(IOService *provider) {
   if (!g_sw_fb_md) {
     g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
         kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
-        (vm_size_t)DF_MFB_W * DF_MFB_H * 4, page_size);
+        (vm_size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4, page_size);
     if (g_sw_fb_md) {
       g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
       if (g_sw_fb_kva) {
-        bzero(g_sw_fb_kva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+        bzero(g_sw_fb_kva, (size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4);
       }
       printf("mfb: pre-allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
     }
@@ -600,7 +601,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       m[0] = DF_MFB_W;       /* 1080 */
       m[1] = DF_MFB_H;       /* 2400 */
       m[2] = 60;             /* 60 Hz */
-      m[3] = DF_MFB_W * 4;   /* 4320 bytes per row */
+      m[3] = DF_MFB_STRIDE_PX * 4;   /* 4352 bytes per row (64B aligned for the Mali) */
       m[4] = 32;             /* 32 bpp */
       m[5] = 0x42475241;     /* 'BGRA' */
     }
@@ -650,9 +651,9 @@ IOReturn DFMobileFramebufferUC::externalMethod(
         gpu_done = 1;   /* Mali-G52 composited frame + wallpaper straight into the LCD buffer */
       } else if (g_boot_logo_done) {
         /* one pass: copy frame, pure-black pixels show the wallpaper (2x upscale) */
-        const uint32_t *src = g_sw_fb_kva;
         volatile uint32_t *dst = df_fbva;
         for (uint32_t y = 0; y < DF_MFB_H; y++) {
+          const uint32_t *src = g_sw_fb_kva + (size_t)y * DF_MFB_STRIDE_PX;
           const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
           for (uint32_t x = 0; x < DF_MFB_W; x++) {
             uint32_t px = *src++;
@@ -841,11 +842,11 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
     if (!g_sw_fb_md) {
       g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
           kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
-          (vm_size_t)DF_MFB_W * DF_MFB_H * 4, page_size);
+          (vm_size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4, page_size);
       if (g_sw_fb_md) {
         g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
         if (g_sw_fb_kva) {
-          bzero(g_sw_fb_kva, (size_t)DF_MFB_W * DF_MFB_H * 4);
+          bzero(g_sw_fb_kva, (size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4);
         }
         printf("ios: allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
       }
@@ -860,7 +861,7 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
       }
       if (!fUserFbAddr && map) {
         mach_vm_allocate(map, &fUserFbAddr,
-                         (mach_vm_size_t)DF_MFB_W * DF_MFB_H * 4, 1);
+                         (mach_vm_size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4, 1);
       }
     }
 
@@ -882,13 +883,13 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
     *(uint64_t *)(out + 0x10) = 0;          /* detach/plane pointer */
     *(uint32_t *)(out + 0x18) = target_sid; /* surface_id */
     *(uint32_t *)(out + 0x1c) =
-        DF_MFB_W * DF_MFB_H * 4;              /* alloc_size = 10,368,000 */
+        DF_MFB_STRIDE_PX * DF_MFB_H * 4;              /* alloc_size = 10,368,000 */
     *(uint32_t *)(out + 0x20) = DF_MFB_W;     /* width = 1080 */
     *(uint32_t *)(out + 0x24) = DF_MFB_H;     /* height = 2400 */
-    *(uint32_t *)(out + 0x28) = DF_MFB_W * 4; /* bytes_per_row = 4320 */
+    *(uint32_t *)(out + 0x28) = DF_MFB_STRIDE_PX * 4; /* bytes_per_row = 4352: Mali needs 64-byte aligned texture rows */
     *(uint32_t *)(out + 0x2c) = 0;            /* plane 0 offset = 0 */
     *(uint32_t *)(out + 0x30) =
-        DF_MFB_W * DF_MFB_H * 4;            /* plane 0 size = 10,368,000 */
+        DF_MFB_STRIDE_PX * DF_MFB_H * 4;            /* plane 0 size = 10,368,000 */
     *(uint32_t *)(out + 0x34) = 0x42475241; /* pixel_format = 'BGRA' */
     *(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
     *(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset (alt) */

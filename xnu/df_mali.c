@@ -619,8 +619,8 @@ dfm_comp_build(const uint32_t *swfb)
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
-	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, (uint64_t)DFM_FB_W * DFM_FB_H * 4);
-	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 540ULL * 1200 * 4);
+	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, 4352ULL * DFM_FB_H);   /* 1088-px pitch */
+	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 544ULL * 1200 * 4);
 	e |= dfm_map_block_gb(DFM_FB_PA);
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_mem));
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_heap));
@@ -695,7 +695,7 @@ df_mali_compose(const uint32_t *swfb)
 
 	uint64_t t0 = mach_absolute_time();
 	/* the CPU rendered into cacheable memory; the GPU reads it non-cacheable */
-	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)DFM_FB_W * DFM_FB_H * 4; a += 64) {
+	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)4352 * DFM_FB_H; a += 64) {
 		__asm__ volatile ("dc cvac, %0" :: "r"(a) : "memory");
 	}
 	dfm_clean(dfm_mem + 0x5000, 0x800);
@@ -727,8 +727,8 @@ df_mali_compose(const uint32_t *swfb)
 		    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 	}
 	dfm_comp_frames++;
-	printf("mali: variant %d (%s) frame %s\n", dfm_comp_solid, dfm_var_name[dfm_comp_solid], ok ? "OK" : "FAULT");
-	if (dfm_comp_solid < 3 && (!ok || (dfm_comp_solid > 0 && ++dfm_var_frames >= 2))) {
+
+	if (0 && dfm_comp_solid < 3 && (!ok || (dfm_comp_solid > 0 && ++dfm_var_frames >= 2))) {   /* bisect done: main only */
 		/* bisect: try the next shader variant on the same pipeline */
 		dfm_comp_solid++;
 		dfm_var_frames = 0;

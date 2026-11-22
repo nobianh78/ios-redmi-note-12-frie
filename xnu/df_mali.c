@@ -445,13 +445,15 @@ df_mali_frag(void)
 	fbd[10] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);  /* bound max x/y */
 	fbd[11] = (0u << 0)  /* 1 sample */ | (8u << 9) /* tile 256 px = 16x16 */ |
 	    (0u << 19) /* 1 RT */ | (1u << 24) /* 1 KB colour buffer per tile */;
+	fbd[12] = (1u << 29);   /* Empty Tile Write Enable: no draws, every tile is "empty" */
 	fbd[14] = (uint32_t)tctx_pa;
 	fbd[15] = (uint32_t)(tctx_pa >> 32);
 
 	/* Render Target 0: RGBA8 tile buffer -> linear BGRA writeback straight into the LCD buffer */
 	rt[0] = (1u << 26);                                           /* internal format R8G8B8A8 */
 	rt[1] = (1u << 0) /* write enable */ | (19u << 3) /* R8G8B8A8 */ | (2u << 8) /* linear */ |
-	    ((2u | (1u << 3) | (0u << 6) | (3u << 9)) << 16);         /* swizzle B,G,R,A */
+	    ((2u | (1u << 3) | (0u << 6) | (3u << 9)) << 16) |        /* swizzle B,G,R,A */
+	    (1u << 31);                                               /* clean pixel write enable */
 	rt[8] = (uint32_t)DFM_FB_PA;
 	rt[9] = (uint32_t)(DFM_FB_PA >> 32);
 	rt[10] = DFM_FB_W * 4;                                         /* row stride */

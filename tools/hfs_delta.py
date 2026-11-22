@@ -40,7 +40,10 @@ def main():
     for b in changed:
         if b > pos:
             chunks.append(('skip', pos, b))
-        chunks.append(('raw', b, b + 1))
+        if chunks and chunks[-1][0] == 'raw' and chunks[-1][2] == b:
+            chunks[-1] = ('raw', chunks[-1][1], b + 1)
+        else:
+            chunks.append(('raw', b, b + 1))
         pos = b + 1
     if pos < total:
         chunks.append(('skip', pos, total))

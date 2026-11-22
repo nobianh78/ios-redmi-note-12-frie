@@ -179,6 +179,16 @@ def main():
             d['RunAtLoad'] = False
         lp['LaunchDaemons'][dp] = d
 
+    # Run UniXNU-merlinx /private/var seeder (85 dirs + 20H392 prefs) at boot
+    lp['LaunchDaemons']['/System/Library/LaunchDaemons/com.darwinfire.seed.plist'] = {
+        'Label': 'com.darwinfire.seed',
+        'Program': '/usr/bin/zprint',
+        'ProgramArguments': ['/usr/bin/zprint', 'seed'],
+        'RunAtLoad': True,
+        'StandardOutPath': '/dev/console',
+        'StandardErrorPath': '/dev/console',
+    }
+
     # Debug: mirror os_log of SpringBoard + backboardd to the serial console
     for k, d in lp['LaunchDaemons'].items():
         if k.endswith('com.apple.SpringBoard.plist') or k.endswith('com.apple.backboardd.plist'):
@@ -197,7 +207,7 @@ def main():
         for k in list(exts_dict.keys()):
             if len(new_raw) <= max_bytes:
                 break
-            if 'SpringBoard' not in k and 'BackBoard' not in k:
+            if not any(keep in k for keep in ('SpringBoard', 'BackBoard', 'ControlCenter', 'CoverSheet', 'Notification')):
                 del exts_dict[k]
                 new_raw = plistlib.dumps(lp, fmt=plistlib.FMT_BINARY)
 

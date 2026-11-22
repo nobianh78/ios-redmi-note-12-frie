@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DarwinFire: pull an Apple iOS 16 wallpaper out of ios16_root.img and turn it into the raw
-half-resolution BGRA blob (540x1200, 4 B/px, top-down) that df_mfb.cpp composites under the
+half-resolution BGRA blob (544x1200, 4 B/px, top-down) that df_mfb.cpp composites under the
 black pixels of every SpringBoard frame (PosterBoard needs Metal, so there is no real wallpaper).
 Usage: python tools/make_wallpaper.py [hfs path of image] [out.bin]
 """
@@ -11,7 +11,7 @@ from hfs_inject_cache import Img, BS
 from hfs_fill_empty import catalog
 from PIL import Image
 
-W, H = 540, 1200
+W, H = 544, 1200   # 2176-byte rows: Mali textures need 64-byte aligned strides
 SRC = sys.argv[1] if len(sys.argv) > 1 else \
     '/System/Library/PrivateFrameworks/Settings/DisplayAndBrightnessSettings.framework/ContinuousExposeLayout-Light-LTR.ca/assets/SydneyWallpaper.jpg'
 OUT = sys.argv[2] if len(sys.argv) > 2 else 'xnu/df_wallpaper.bin'

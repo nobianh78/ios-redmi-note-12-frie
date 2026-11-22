@@ -23,7 +23,7 @@
 
 #define FB_W        1080
 #define FB_H        2400
-#define WALL_W      540
+#define WALL_W      544
 #define WALL_H      1200
 #define BLOB_VA     0x10000000ULL
 #define SWFB_VA     0x20000000ULL
@@ -131,12 +131,12 @@ main(int argc, char **argv)
    /* Surfaces + textures */
    pan_pack(blob + OFF_SURF, SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = SWFB_VA;
-      cfg.row_stride = tex64 ? 4352 : FB_W * 4;
-      cfg.surface_stride = FB_W * FB_H * 4;
+      cfg.row_stride = 4352;            /* SW frame pitch 1088 px: Mali needs 64-byte rows */
+      cfg.surface_stride = 4352 * FB_H;
    }
    pan_pack(blob + OFF_SURF + pan_size(SURFACE_WITH_STRIDE), SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = WALL_VA;
-      cfg.row_stride = tex64 ? 2176 : WALL_W * 4;
+      cfg.row_stride = WALL_W * 4;      /* 2176 */
       cfg.surface_stride = WALL_W * WALL_H * 4;
    }
    const struct panfrost_format bgra = GENX(panfrost_pipe_format)[PIPE_FORMAT_B8G8R8A8_UNORM];
@@ -145,7 +145,7 @@ main(int argc, char **argv)
          cfg.dimension = MALI_TEXTURE_DIMENSION_2D;
          cfg.format = bgra.hw;
          cfg.width = t ? WALL_W : FB_W;
-         cfg.height = tex64 ? (t ? 1100 : 2300) : (t ? WALL_H : FB_H);
+         cfg.height = t ? WALL_H : FB_H;
          cfg.swizzle = 0 | (1 << 3) | (2 << 6) | (3 << 9); /* identity */
          cfg.texel_ordering = MALI_TEXTURE_LAYOUT_LINEAR;
          cfg.levels = 1;

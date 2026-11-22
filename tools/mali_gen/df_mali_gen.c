@@ -132,11 +132,14 @@ main(int argc, char **argv)
          cfg.surfaces = BLOB_VA + OFF_SURF + t * pan_size(SURFACE_WITH_STRIDE);
       }
    }
-   pan_pack(blob + OFF_SAMP, SAMPLER, cfg) {
-      cfg.normalized_coordinates = false;
-      cfg.minify_nearest = true;
-      cfg.magnify_nearest = true;
-      cfg.clamp_integer_array_indices = false;
+   /* the compiled shader declares one sampler per texture (pandecode: "Sampler count: 2") */
+   for (unsigned s = 0; s < 2; s++) {
+      pan_pack(blob + OFF_SAMP + s * pan_size(SAMPLER), SAMPLER, cfg) {
+         cfg.normalized_coordinates = false;
+         cfg.minify_nearest = true;
+         cfg.magnify_nearest = true;
+         cfg.clamp_integer_array_indices = false;
+      }
    }
 
    /* Viewport, positions, TLS */

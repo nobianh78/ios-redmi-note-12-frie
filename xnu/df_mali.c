@@ -706,8 +706,9 @@ df_mali_compose(const uint32_t *swfb)
 	dfm_clean(job, 64);
 	int ok = (raw & 1u) && !(raw & (1u << 16)) && job[0] == 1;
 	if (!ok || dfm_comp_frames < 5 || (dfm_comp_frames % 300) == 0) {
-		printf("mali: comp #%u %s raw 0x%x exc 0x%x | flush %llu us gpu %llu us | mmu 0x%x fault 0x%x @0x%x\n",
-		    dfm_comp_frames, ok ? "ok" : "FAIL", raw, job[0], (t1 - t0) / 13, (t2 - t1) / 13,
+		printf("mali: comp #%u %s raw 0x%x exc 0x%x gfault 0x%x @0x%x | flush %llu us gpu %llu us | mmu 0x%x fault 0x%x @0x%x\n",
+		    dfm_comp_frames, ok ? "ok" : "FAIL", raw, job[0], dfm_r(dfm_gpu, 0x3C), dfm_r(dfm_gpu, 0x40),
+		    (t1 - t0) / 13, (t2 - t1) / 13,
 		    dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT), dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS),
 		    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 	}

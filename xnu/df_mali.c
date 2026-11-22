@@ -518,6 +518,7 @@ static uint64_t dfm_pt_pa;
 static int dfm_comp_state;          /* 0 off, 1 armed (after Ctrl-P), 2 tables built, -1 failed */
 static const uint32_t *dfm_comp_swfb;
 static uint32_t dfm_comp_frames;
+static int dfm_comp_solid;          /* 1: magenta constant shader (fault bisect) */
 
 static uint64_t *
 dfm_pt_alloc(uint64_t *pa)
@@ -600,8 +601,17 @@ dfm_comp_build(const uint32_t *swfb)
 	}
 	dfm_pt_used = 0x1000;                                  /* L1 lives at offset 0 */
 	uint8_t *blobk = dfm_mem + 0x6000;                     /* 4K-aligned copy of the blob */
-	for (unsigned i = 0; i < DF_MALI_BLOB_SIZE; i++) {
-		blobk[i] = df_mali_blob[i];
+	for (unsigned i = 0; i < 0x2000; i++) {
+		blobk[i] = 0;
+	}
+	if (dfm_comp_solid) {
+		for (unsigned i = 0; i < DF_MALI_SOLID_SIZE; i++) {
+			blobk[i] = df_mali_blob_solid[i];
+		}
+	} else {
+		for (unsigned i = 0; i < DF_MALI_BLOB_SIZE; i++) {
+			blobk[i] = df_mali_blob[i];
+		}
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
@@ -713,6 +723,13 @@ df_mali_compose(const uint32_t *swfb)
 		    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 	}
 	dfm_comp_frames++;
+	if (!ok && !dfm_comp_solid) {
+		/* bisect: same pipeline, constant-colour shader without textures */
+		printf("mali: texture shader faulted, retrying with the solid magenta shader\n");
+		dfm_comp_solid = 1;
+		dfm_comp_state = 1;
+		return df_mali_compose(swfb);
+	}
 	if (!ok) {
 		dfm_comp_state = -1;                            /* fall back to the CPU for good */
 		return -1;

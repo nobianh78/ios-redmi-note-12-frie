@@ -523,7 +523,7 @@ static uint64_t *
 dfm_pt_alloc(uint64_t *pa)
 {
 	if (dfm_pt_used + 0x1000 > sizeof(dfm_pt)) {
-		return NULL;
+		return 0;
 	}
 	uint64_t *t = (uint64_t *)(dfm_pt + dfm_pt_used);
 	*pa = dfm_pt_pa + dfm_pt_used;
@@ -554,7 +554,7 @@ dfm_map4k(uint64_t va, uint64_t pa)
 {
 	uint64_t *l1 = (uint64_t *)dfm_pt;
 	uint64_t *l2 = dfm_pt_next(l1, (unsigned)(va >> 30));
-	uint64_t *l3 = l2 ? dfm_pt_next(l2, (unsigned)((va >> 21) & 511)) : NULL;
+	uint64_t *l3 = l2 ? dfm_pt_next(l2, (unsigned)((va >> 21) & 511)) : 0;
 	if (!l3) {
 		return -1;
 	}

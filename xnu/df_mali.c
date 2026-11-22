@@ -373,6 +373,9 @@ df_mali_hello(void)
 #define DFM_FB_PA         0x7ce6a000ULL
 #define DFM_FB_W          1080
 #define DFM_FB_H          2400
+#define DFM_SW_W          720
+#define DFM_SW_H          1600
+#define DFM_SW_STRIDE     (DFM_SW_W * 4)   /* 2880 B = 45 * 64 B, natively 64B-aligned */
 
 static uint64_t dfm_l2_gb[3];
 static int dfm_l2_n;
@@ -619,7 +622,7 @@ dfm_comp_build(const uint32_t *swfb)
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
-	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, 4320ULL * DFM_FB_H);   /* viewed as 2160x1200 @ 8640 B */
+	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, (uint64_t)DFM_SW_STRIDE * DFM_SW_H); /* 720x1600 @ 2880 B */
 	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 544ULL * 1200 * 4);
 	e |= dfm_map_block_gb(DFM_FB_PA);
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_mem));
@@ -694,8 +697,8 @@ df_mali_compose(const uint32_t *swfb)
 	job[10] = (uint32_t)fbptr;  job[11] = (uint32_t)(fbptr >> 32);
 
 	uint64_t t0 = mach_absolute_time();
-	/* the CPU rendered into cacheable memory; the GPU reads it non-cacheable */
-	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)4320 * DFM_FB_H; a += 64) {
+	/* the CPU rendered 720x1600 into cacheable memory; the GPU reads it non-cacheable */
+	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)DFM_SW_STRIDE * DFM_SW_H; a += 64) {
 		__asm__ volatile ("dc cvac, %0" :: "r"(a) : "memory");
 	}
 	dfm_clean(dfm_mem + 0x5000, 0x800);
@@ -754,4 +757,11 @@ df_mali_comp_arm(void)
 	dfm_comp_state = 1;
 	dfm_comp_frames = 0;
 	printf("mali: GPU compositor armed (next SwapEnd draws on the Mali)\n");
+}
+
+int df_mali_is_armed(void);
+int
+df_mali_is_armed(void)
+{
+	return dfm_comp_state > 0;
 }

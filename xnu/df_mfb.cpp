@@ -30,12 +30,19 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
                                  mach_msg_size_t send_size);
 
 #define DF_MFB_PHYS 0x7ce6a000ULL
-#define DF_MFB_W 1080
-#define DF_MFB_H 2400
-#define DF_MFB_STRIDE_PX 1080   /* iOS ignores a padded bytes_per_row (frame came out skewed): keep 4320 B */
+/* Physical LCD panel buffer is 1080x2400 (top of 1080x2460 display);
+ * iOS renders at 720x1600 @2x (= 360x800 pt, identical UI layout, 2880 B 64B-aligned stride)
+ * and the Mali-G52 GPU compositor upscales bilinearly to 1080x2400 in hardware. */
+#define DF_LCD_W 1080
+#define DF_LCD_H 2400
+#define DF_MFB_W 720
+#define DF_MFB_H 1600
+#define DF_MFB_STRIDE_PX 720    /* 2880 B = 45 * 64 B: natively 64-byte aligned for Mali-G52! */
 #define DF_L0_PHYS 0x7c430000ULL
 #define DF_L0_STRIDE 4352
 #define DF_L0_H 2460
+
+extern "C" volatile int df_mali_auto_arm;
 
 static mach_vm_address_t g_user_fb_addr = 0;
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
@@ -66,7 +73,7 @@ static void df_flush_fb(void) {
   if (!df_fbva)
     return;
   for (uintptr_t a = (uintptr_t)df_fbva;
-       a < (uintptr_t)df_fbva + (uintptr_t)DF_MFB_W * DF_MFB_H * 4; a += 64) {
+       a < (uintptr_t)df_fbva + (uintptr_t)DF_LCD_W * DF_LCD_H * 4; a += 64) {
     __asm__ volatile("dc civac, %0" ::"r"(a) : "memory");
   }
   __asm__ volatile("dsb sy" ::: "memory");
@@ -89,11 +96,11 @@ static void df_clear_l0(void) {
     }
   }
   /* Also clear bottom 60 rows (2400..2459) of OVL0 L3 (1080x2460) so no blue strip remains */
-  size_t tail_bytes = (size_t)DF_MFB_W * (DF_L0_H - DF_MFB_H) * 4;
+  size_t tail_bytes = (size_t)DF_LCD_W * (DF_L0_H - DF_LCD_H) * 4;
   static volatile uint32_t *df_l3_tail = NULL;
   if (!df_l3_tail) {
     df_l3_tail = (volatile uint32_t *)ml_io_map_unmappable(
-        DF_MFB_PHYS + (vm_offset_t)DF_MFB_W * DF_MFB_H * 4,
+        DF_MFB_PHYS + (vm_offset_t)DF_LCD_W * DF_LCD_H * 4,
         (vm_size_t)tail_bytes);
   }
   if (df_l3_tail) {
@@ -123,7 +130,7 @@ static void df_draw_boot_bar(uint32_t fill_w, uint32_t pulse_x) {
   if (fill_w > DF_BAR_W)
     fill_w = DF_BAR_W;
   for (uint32_t dy = 0; dy < DF_BAR_H; dy++) {
-    volatile uint32_t *row = &df_fbva[(DF_BAR_Y + dy) * DF_MFB_W + DF_BAR_X];
+    volatile uint32_t *row = &df_fbva[(DF_BAR_Y + dy) * DF_LCD_W + DF_BAR_X];
     int edge = (dy == 0 || dy == DF_BAR_H - 1);
     for (uint32_t dx = 0; dx < DF_BAR_W; dx++) {
       if (edge && (dx < 2 || dx >= DF_BAR_W - 2)) {
@@ -147,8 +154,8 @@ static void df_draw_boot_bar(uint32_t fill_w, uint32_t pulse_x) {
 static void df_draw_apple_logo(void) {
   if (!df_fbva)
     return;
-  const uint32_t x0 = (DF_MFB_W - DF_LOGO_W) / 2;
-  const uint32_t y0 = (DF_MFB_H - DF_LOGO_H) / 2 - 40;
+  const uint32_t x0 = (DF_LCD_W - DF_LOGO_W) / 2;
+  const uint32_t y0 = (DF_LCD_H - DF_LOGO_H) / 2 - 40;
   uint32_t idx = 0;
   const uint32_t total = (uint32_t)DF_LOGO_W * DF_LOGO_H;
   for (uint32_t k = 0; k + 1 < DF_LOGO_RLE_LEN && idx < total; k += 2) {
@@ -162,7 +169,7 @@ static void df_draw_apple_logo(void) {
     while (run-- && idx < total) {
       uint32_t lx = idx % DF_LOGO_W;
       uint32_t ly = idx / DF_LOGO_W;
-      df_fbva[(y0 + ly) * DF_MFB_W + (x0 + lx)] = col;
+      df_fbva[(y0 + ly) * DF_LCD_W + (x0 + lx)] = col;
       idx++;
     }
   }
@@ -173,7 +180,7 @@ static void df_clear_fb(void) {
   df_clear_l0();
   if (!df_fbva)
     return;
-  for (size_t i = 0; i < (size_t)DF_MFB_W * DF_MFB_H; i++) {
+  for (size_t i = 0; i < (size_t)DF_LCD_W * DF_LCD_H; i++) {
     df_fbva[i] = 0xff000000;
   }
   if (!g_boot_logo_done) {
@@ -494,7 +501,7 @@ void DFMobileFramebufferUC::vsyncTimerAction(OSObject *owner,
     }
   }
   if (sender) {
-    sender->setTimeoutMS(50);
+    sender->setTimeoutMS(g_boot_logo_done ? 16 : 50);
   }
 }
 
@@ -605,7 +612,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       m[4] = 32;             /* 32 bpp */
       m[5] = 0x42475241;     /* 'BGRA' */
     }
-    printf("mfb: sel 74 (display mode) -> 1080x2400@60\n");
+    printf("mfb: sel 74 (display mode) -> %dx%d@60\n", DF_MFB_W, DF_MFB_H);
   }
   if (selector == 79) {
     if (a->scalarOutputCount >= 1) {
@@ -625,7 +632,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     static uint32_t s_swap_cnt = 0;
     if (!df_fbva) {
       df_fbva = (volatile uint32_t *)ml_io_map_unmappable(
-          DF_MFB_PHYS, (vm_size_t)DF_MFB_W * DF_MFB_H * 4);
+          DF_MFB_PHYS, (vm_size_t)DF_LCD_W * DF_LCD_H * 4);
     }
     s_swap_cnt++;
     uint32_t nonblack = 0;
@@ -645,28 +652,31 @@ IOReturn DFMobileFramebufferUC::externalMethod(
         }
         if (nonblack > 2000) {
           g_boot_logo_done = 1;
+          if (!df_mali_auto_arm) {
+            df_mali_auto_arm = 1; /* auto-probe & arm Mali-G52 GPU compositor */
+          }
         }
       }
       if (g_boot_logo_done && df_mali_compose(g_sw_fb_kva) == 0) {
-        gpu_done = 1;   /* Mali-G52 composited frame + wallpaper straight into the LCD buffer */
+        gpu_done = 1;   /* Mali-G52 upscaled 720x1600 -> 1080x2400 straight into LCD */
       } else if (g_boot_logo_done) {
-        /* one pass: copy frame, pure-black pixels show the wallpaper (2x upscale) */
+        /* CPU fallback before Mali auto-arms: 1.5x upscale + true premultiplied alpha */
         volatile uint32_t *dst = df_fbva;
-        for (uint32_t y = 0; y < DF_MFB_H; y++) {
-          const uint32_t *src = g_sw_fb_kva + (size_t)y * DF_MFB_STRIDE_PX;
+        for (uint32_t y = 0; y < DF_LCD_H; y++) {
+          uint32_t sy = (y * 2u) / 3u;
+          const uint32_t *srow = g_sw_fb_kva + (size_t)sy * DF_MFB_STRIDE_PX;
           const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
-          for (uint32_t x = 0; x < DF_MFB_W; x++) {
-            uint32_t px = *src++;
-            uint32_t r = (px >> 16) & 0xff, g = (px >> 8) & 0xff, b = px & 0xff;
-            uint32_t a = r > g ? r : g;
-            a = a > b ? a : b;
-            if (a < 250) {
-              /* UI was rendered over black: treat brightness as coverage and add the
-               * wallpaper behind it (out = ui + wall * (1 - a)), no dark halos on edges */
-              uint32_t w = wrow[x >> 1], k = 255 - a;
-              r += (((w >> 16) & 0xff) * k) >> 8;
-              g += (((w >> 8) & 0xff) * k) >> 8;
-              b += ((w & 0xff) * k) >> 8;
+          for (uint32_t x = 0; x < DF_LCD_W; x++) {
+            uint32_t px = srow[(x * 2u) / 3u];
+            uint32_t a = (px >> 24) & 0xffu;
+            if (a < 255u) {
+              uint32_t w = wrow[x >> 1], k = 255u - a;
+              uint32_t r = ((px >> 16) & 0xffu) + ((((w >> 16) & 0xffu) * k) >> 8);
+              uint32_t g = ((px >> 8) & 0xffu) + ((((w >> 8) & 0xffu) * k) >> 8);
+              uint32_t b = (px & 0xffu) + (((w & 0xffu) * k) >> 8);
+              if (r > 255u) r = 255u;
+              if (g > 255u) g = 255u;
+              if (b > 255u) b = 255u;
               px = (r << 16) | (g << 8) | b;
             }
             *dst++ = px | 0xff000000U;
@@ -701,7 +711,7 @@ DFMobileFramebufferUC::clientMemoryForType(UInt32 type, IOOptionBits *options,
                                            IOMemoryDescriptor **memory) {
   printf("mfb: clientMemoryForType %u\n", (unsigned)type);
   *memory = IOMemoryDescriptor::withPhysicalAddress(
-      DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
+      DF_MFB_PHYS, (IOByteCount)DF_LCD_W * DF_LCD_H * 4, kIODirectionInOut);
   return *memory ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 
@@ -925,7 +935,7 @@ IOReturn DFCoreSurfaceUC::clientMemoryForType(UInt32 type,
                                               IOMemoryDescriptor **memory) {
   printf("ios: clientMemoryForType %u\n", (unsigned)type);
   *memory = IOMemoryDescriptor::withPhysicalAddress(
-      DF_MFB_PHYS, (IOByteCount)DF_MFB_W * DF_MFB_H * 4, kIODirectionInOut);
+      DF_MFB_PHYS, (IOByteCount)DF_LCD_W * DF_LCD_H * 4, kIODirectionInOut);
   return *memory ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 

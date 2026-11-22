@@ -45,41 +45,42 @@ def enc_movz_w(rd, imm16):
     return 0x52800000 | ((imm16 & 0xffff) << 5) | (rd & 31)
 
 def build_trampoline(pc0):
-    # Called from SWContext::vtable[+0x358] (0x188445294):
-    #   x0 = SWContext*, x1 = CA::OGL::Surface*
-    # Extracts IOSurfaceRef via Surface->vtable[+0x98](), then IOSurfaceGetBaseAddress(),
-    # and calls SWContext::set_destination(baseAddr, 4320, 32, 1080, 2400).
+    # Called from SWContext::set_destination_surface (0x188445304, right after Surface->vtable[+0x80]()):
+    #   x20 = SWContext*, x19 = CA::OGL::Surface*, w0 = result of Surface->lock_cpu(&rb, &baseAddr)
+    #   x21..x24 are already callee-saved by 0x188445294's prologue, and [sp] has scratch space.
+    #
+    # 1. If w0 != 0 (CPU offscreen Surface: BGRA backdrop/blur, L008 alpha mask, L555/L565):
+    #    branch straight back to 0x188445308 so Apple's original SWContext renders ALL offscreen
+    #    surfaces, masks (OrbFlashlight/OrbCamera/CC icons), and blurs natively!
+    # 2. If w0 == 0 (display IOSurface where lock_cpu returns false):
+    #    query Surface->vtable[+0x98]() -> IOSurfaceRef, dynamically read IOSurfaceGetBaseAddress()
+    #    and IOSurfaceGetBytesPerRow(), read viewport [x20,#0xb8..#0xc4] (works at 720x1600 AND
+    #    1080x2400 with zero hardcoding!), call SWContext::set_destination(), and return 1.
     insns = [
-        0xd100c3ff,                     # +0x00: sub  sp, sp, #0x30
-        0xa90153f3,                     # +0x04: stp  x19, x20, [sp, #0x10]
-        0xa9027bfd,                     # +0x08: stp  x29, x30, [sp, #0x20]
-        0xaa0003f3,                     # +0x0c: mov  x19, x0   (SWContext*)
-        0xaa0103f4,                     # +0x10: mov  x20, x1   (Surface*)
-        0xd2800000,                     # +0x14: mov  x0, #0
-        0xb40000f4,                     # +0x18: cbz  x20, +0x1c (-> +0x34)
-        0xf9400288,                     # +0x1c: ldr  x8, [x20]
-        0xf9404d08,                     # +0x20: ldr  x8, [x8, #0x98] (Surface::iosurface)
-        0xaa1403e0,                     # +0x24: mov  x0, x20
-        0xd63f0100,                     # +0x28: blr  x8
-        0xb4000040,                     # +0x2c: cbz  x0, +0x08 (-> +0x34)
-        enc_bl(pc0 + 0x30, 0x18dbcc5a4),# +0x30: bl   IOSurfaceGetBaseAddress
-        0xaa0003e1,                     # +0x34: mov  x1, x0    (baseAddr)
-        0xaa0003e4,                     # +0x38: mov  x4, x0    (baseAddr)
-        0xaa1303e0,                     # +0x3c: mov  x0, x19   (SWContext*)
-        enc_movz_w(2, 4320),            # +0x40: mov  w2, #4320 (rowbytes)
-        enc_movz_w(5, 4320),            # +0x44: mov  w5, #4320 (rowbytes)
-        enc_movz_w(3, 32),              # +0x48: mov  w3, #32   (bpp)
-        enc_movz_w(6, 0),               # +0x4c: mov  w6, #0
-        enc_movz_w(7, 0),               # +0x50: mov  w7, #0
-        enc_movz_w(10, 1080),           # +0x54: mov  w10, #1080 (width)
-        enc_movz_w(11, 2400),           # +0x58: mov  w11, #2400 (height)
-        0x29002fea,                     # +0x5c: stp  w10, w11, [sp]
-        enc_bl(pc0 + 0x60, 0x1884457f8),# +0x60: bl   SWContext::set_destination
-        enc_movz_w(0, 1),               # +0x64: mov  w0, #1    (return true)
-        0xa94153f3,                     # +0x68: ldp  x19, x20, [sp, #0x10]
-        0xa9427bfd,                     # +0x6c: ldp  x29, x30, [sp, #0x20]
-        0x9100c3ff,                     # +0x70: add  sp, sp, #0x30
-        0xd65f03c0,                     # +0x74: ret
+        0x34000040,                     # +0x00: cbz  w0, +0x08 (IOSurface fallback)
+        enc_b(pc0 + 0x04, 0x188445308), # +0x04: b    0x188445308 (original CPU offscreen surface path)
+        0xf9400268,                     # +0x08: ldr  x8, [x19]           (Surface vtable)
+        0xf9404d08,                     # +0x0c: ldr  x8, [x8, #0x98]     (Surface::iosurface)
+        0xaa1303e0,                     # +0x10: mov  x0, x19
+        0xd63f0100,                     # +0x14: blr  x8                  (x0 = IOSurfaceRef)
+        0xb5000040,                     # +0x18: cbnz x0, +0x08
+        enc_b(pc0 + 0x1c, 0x1884453c0), # +0x1c: b    0x1884453c0         (return 1 if NULL)
+        0xaa0003f5,                     # +0x20: mov  x21, x0             (save IOSurfaceRef)
+        enc_bl(pc0 + 0x24, 0x18dbcc5a4),# +0x24: bl   IOSurfaceGetBaseAddress
+        0xaa0003f6,                     # +0x28: mov  x22, x0             (save baseAddr)
+        0xaa1503e0,                     # +0x2c: mov  x0, x21
+        enc_bl(pc0 + 0x30, 0x18dbcc5d4),# +0x30: bl   IOSurfaceGetBytesPerRow
+        0xaa0003e2,                     # +0x34: mov  x2, x0              (rowbytes)
+        0xaa0003e5,                     # +0x38: mov  x5, x0              (alpha rowbytes)
+        0xaa1603e1,                     # +0x3c: mov  x1, x22             (baseAddr)
+        0xaa1603e4,                     # +0x40: mov  x4, x22             (alpha baseAddr)
+        enc_movz_w(3, 32),              # +0x44: mov  w3, #32             (bpp)
+        0x29571e86,                     # +0x48: ldp  w6, w7, [x20, #0xb8] (viewport x, y)
+        0x29582688,                     # +0x4c: ldp  w8, w9, [x20, #0xc0] (viewport w, h)
+        0x290027e8,                     # +0x50: stp  w8, w9, [sp]
+        0xaa1403e0,                     # +0x54: mov  x0, x20             (SWContext*)
+        enc_bl(pc0 + 0x58, 0x1884457f8),# +0x58: bl   SWContext::set_destination
+        enc_b(pc0 + 0x5c, 0x1884453c0), # +0x5c: b    0x1884453c0         (return 1, epilogue)
     ]
     return b''.join(struct.pack('<I', w) for w in insns)
 
@@ -93,11 +94,12 @@ def main():
     patches = [
         (0x1882eafa4, struct.pack('<I', 0xd503201f), 'nop (skip EAGL fallback)'),
         (0x1882eafc4, struct.pack('<I', enc_bl(0x1882eafc4, 0x1884409d0)), 'bl SWContext::new'),
-        (0x1882eb0d8, tramp, 'SWContext::set_destination_surface -> Surface::iosurface -> SWContext::set_destination trampoline'),
+        (0x1882eb0d8, tramp, 'SWContext::set_destination_surface offscreen-preserving IOSurface fallback trampoline'),
         (0x1884053c8, struct.pack('<I', 0x52800000), 'restore vtable +0x20 to mov w0, #0'),
         (0x1884053e4, struct.pack('<I', 0x52800020), 'mov w0, #1 (SWContext::supports_iosurface vtable +0x40)'),
         (0x1884053ec, struct.pack('<I', 0x92800000), 'mov x0, #-1 (SWContext::supported_surface_flags vtable +0x48)'),
-        (0x188445294, struct.pack('<I', enc_b(0x188445294, 0x1882eb0d8)), 'b trampoline (SWContext::set_destination_surface vtable +0x358)'),
+        (0x188445294, struct.pack('<I', 0xd10283ff), 'RESTORE SWContext::set_destination_surface prologue (sub sp, sp, #0xa0)'),
+        (0x188445304, struct.pack('<I', enc_b(0x188445304, 0x1882eb0d8)), 'b trampoline (only when Surface->lock_cpu fails -> display IOSurface)'),
     ]
 
     total_blocks = os.path.getsize(IMG_PATH) // BS

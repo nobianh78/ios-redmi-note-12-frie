@@ -139,6 +139,31 @@ def build_fire_adt() -> bytes:
     arm_io.add_child(gic)
     root.add_child(arm_io)
 
+    # /buttons + /product: iPhone X (d221ap) MobileGestalt identity.
+    # Without home-button-type=2 & artwork-device-subtype=2436, BSPlatform.homeButtonType returns 0
+    # (legacy Home-button iPhone), hiding the Home Bar, Lockscreen Quick Actions (Flashlight/Camera),
+    # modern split Status Bar, and top-right Control Center pull-down gesture.
+    buttons = ADTNode("buttons")
+    buttons.add_property("home-button-type", u32(2))
+    buttons.add_property("button-names", cstr("hold") + cstr("voldown") + cstr("volup"))
+    root.add_child(buttons)
+
+    product = ADTNode("product")
+    product.add_property("home-button-type", u32(2))
+    product.add_property("artwork-device-subtype", u32(2436))
+    product.add_property("artwork-device-idiom", cstr("phone"))
+    # Render iOS at 720x1600 @2x (= 360x800 pt, identical logical UI to 1080x2400 @3x)
+    # for 2.25x faster CPU SWContext rendering, upscaled bilinearly to 1080x2400 on Mali-G52.
+    product.add_property("artwork-scale-factor", u32(2))
+    product.add_property("product-description", cstr("iPhone X"))
+    product.add_property("main-screen-scale", u32(2))
+    product.add_property("main-screen-width", u32(720))
+    product.add_property("main-screen-height", u32(1600))
+    product.add_property("main-screen-pitch", u32(267))
+    product.add_property("main-screen-class", u32(18))
+    product.add_property("device-perf-memory-class", u32(1))
+    root.add_child(product)
+
     return root.serialize()
 
 def main():

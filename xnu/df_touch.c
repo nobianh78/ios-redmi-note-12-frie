@@ -63,6 +63,9 @@ extern int df_hid_dispatch_touch(const struct df_touch_pt *pts, int count,
 /* Set by df_usb.c on Ctrl-T (1 = swipe up), Ctrl-Y (2 = tap), Ctrl-G (3 = status) */
 extern volatile int df_touch_test_req;
 volatile int df_touch_test_req = 0;
+/* Set by df_mfb.cpp once Lockscreen renders so Mali-G52 GPU auto-arms without Ctrl-P */
+extern volatile int df_mali_auto_arm;
+volatile int df_mali_auto_arm = 0;
 
 static volatile uint32_t *dft_topck;
 static volatile uint32_t *dft_infra;
@@ -538,11 +541,11 @@ dft_run_test_gesture(int mode)
 	__builtin_memset(&pt, 0, sizeof(pt));
 	pt.id = 0;
 	if (mode == 1) {
-		/* Smooth bottom-edge swipe up: (0.50, 0.98) -> (0.50, 0.30) */
+		/* Smooth bottom-edge swipe up starting strictly inside UIRectEdgeBottom (y=797.7pt -> 240pt) */
 		printf("touch: injecting synthetic swipe-up (Ctrl-T)\n");
 		const int steps = 20;
 		for (int s = 0; s <= steps; s++) {
-			int32_t y = (int32_t)((98 - (68 * s) / steps) * 65536 / 100);
+			int32_t y = 65350 - ((65350 - 19660) * s) / steps;
 			pt.x_fixed = 32768; /* 0.50 */
 			pt.y_fixed = y;
 			if (s == 0) {
@@ -617,17 +620,28 @@ dft_poll_fts(void)
 			if (ev == 3) {
 				continue;
 			}
-			/* Hi-res 8x subpixel coords (verified from fire_linux_Image 0x8be44b0) */
+			/* Hi-res 8x subpixel coords (verified from fire_linux_Image 0x8be44b0).
+			 * Physical panel is 1080x2460; iOS LCD occupies rows 0..2399.
+			 * Map y=0..2399 linearly to 0..65335, and map the 60px bottom chin (2400..2460)
+			 * into 65335..65500 (y=797.5..799.5pt): strictly < 65536 (inside bounds!) AND
+			 * strictly inside UIKit's 13pt UIRectEdgeBottom zone for Home Bar swipe-up! */
 			uint32_t x_hi = (((uint32_t)(p[0] & 0x0f)) << 11) |
 			    ((uint32_t)p[1] << 3) | ((uint32_t)(p[4] >> 4) & 0x7u);
 			uint32_t y_hi = (((uint32_t)(p[2] & 0x0f)) << 11) |
 			    ((uint32_t)p[3] << 3) | ((uint32_t)p[4] & 0x7u);
-			int32_t xf = (int32_t)(((uint64_t)x_hi * 65536ULL) / (DFT_DISP_W * 8ULL));
-			int32_t yf = (int32_t)(((uint64_t)y_hi * 65536ULL) / (DFT_DISP_H * 8ULL));
+			int32_t xf = (int32_t)(((uint64_t)x_hi * 65535ULL) / (DFT_DISP_W * 8ULL));
+			int32_t yf;
+			if (y_hi < (uint32_t)(DFT_DISP_H * 8)) {
+				yf = (int32_t)(((uint64_t)y_hi * 65335ULL) / (DFT_DISP_H * 8ULL));
+			} else {
+				uint32_t extra = y_hi - (uint32_t)(DFT_DISP_H * 8);
+				if (extra > 60u * 8u) extra = 60u * 8u;
+				yf = 65335 + (int32_t)((extra * 165ULL) / (60ULL * 8ULL));
+			}
 			if (xf < 0) xf = 0;
-			if (xf > 65536) xf = 65536;
+			if (xf > 65535) xf = 65535;
 			if (yf < 0) yf = 0;
-			if (yf > 65536) yf = 65536;
+			if (yf > 65500) yf = 65500;
 
 			if (ev == 0 || ev == 2) { /* down or contact */
 				cur_active[id] = 1;
@@ -732,6 +746,19 @@ dft_thread(void *arg __unused, int wait __unused)
 	int ft_ok = (dft_fts_boot() == 0);
 	int idle_polls = 0;
 	for (;;) {
+		if (df_mali_auto_arm == 1) {
+			df_mali_auto_arm = 2;
+			IOSleep(1500);
+			extern void df_mali_probe(void);
+			extern int df_mali_is_armed(void);
+			printf("mali: auto-arming GPU compositor...\n");
+			df_mali_probe();
+			if (!df_mali_is_armed()) {
+				IOSleep(500);
+				printf("mali: auto-arm retry #2...\n");
+				df_mali_probe();
+			}
+		}
 		int req = df_touch_test_req;
 		if (req) {
 			df_touch_test_req = 0;

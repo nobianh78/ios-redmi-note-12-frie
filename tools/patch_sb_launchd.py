@@ -132,6 +132,23 @@ def main():
         (0x1ae3ef908, struct.pack('<II', 0xd2800000, 0xd65f03c0), 'MKB XPC method 0x1ae3ef908 -> return nil'),
         (0x1ae413cc0, struct.pack('<II', 0xd2800000, 0xd65f03c0), 'objc_msgSend$sharedClient (MKB) -> return nil'),
         (0x1ae413ee0, struct.pack('<II', 0xd2800000, 0xd65f03c0), 'objc_msgSend$synchronousRemoteObjectProxy (MKB) -> return nil'),
+        # BaseBoard (.05): force homeButtonType == 2 (iPhone X: Home Bar, Quick Actions, top-right Control Center)
+        (0x18dd51dcc, struct.pack('<II', 0xd2800040, 0xd65f03c0), '-[BSPlatform homeButtonType] -> return 2'),
+        # CoverSheet (.21): enable Lockscreen Flashlight & Camera quick-action buttons even without Apple torch/camera HW
+        (0x1c56261c4, struct.pack('<II', 0x52800020, 0xd65f03c0), '-[CSQuickActionsViewController hasFlashlight] -> return 1'),
+        (0x1c560d95c, struct.pack('<II', 0x52800020, 0xd65f03c0), '-[CSQuickActionsViewController hasCamera] -> return 1'),
+        (0x1c564b150, struct.pack('<II', 0x52800020, 0xd65f03c0), '-[CSQuickActionsViewController allowsFlashlight] -> return 1'),
+        (0x1c564b4b8, struct.pack('<II', 0x52800020, 0xd65f03c0), '-[CSQuickActionsViewController _supportsCamera] -> return 1'),
+        # ContainerManagerCommon (.21): skip 20x sleep(1) retry loop waiting for absent usermanagerd in -[MCMUserIdentityCache _lock_resync]
+        (0x1c4c676bc, struct.pack('<I', 0x14000044), '-[MCMUserIdentityCache _lock_resync] -> b 0x1c4c677cc (0 retries, no 20s sleep)'),
+        # UIKitCore (.03): always return _UIStatusBarVisualProvider_Split1125 from _Split (eliminates red rdar:45025538 fallback bar at 720p & 1080p)
+        (0x189ab566c, struct.pack('<III', enc_adrp(0x189ab566c, 0x1dce07000), 0xf9441d00, 0xd65f03c0),
+         '+[_UIStatusBarVisualProvider_Split visualProviderSubclassForScreen:visualProviderInfo:] -> _Split1125'),
+        # SpringBoard (.21): use in-process CPU PBUIWallpaperViewController (skip Metal PosterBoard) + clearColor window bg fallback
+        (0x1c5b03670, struct.pack('<I', qc.enc_bl(0x1c5b03670, 0x1c622fa40)), 'SBWallpaperController _SBWallpaperSecureWindow bg -> clearColor'),
+        (0x1c5b036a0, struct.pack('<I', qc.enc_b(0x1c5b036a0, 0x1c5b03754)), 'SBWallpaperController -> b PBUIWallpaperViewController (skip PosterBoard Metal)'),
+        # PaperBoardUI: fallback color wallpaper -> clearColor (so GPU composites df_wall_px if cpbitmap missing, zero bleed!)
+        (0x1b0d04fc8, struct.pack('<I', qc.enc_bl(0x1b0d04fc8, 0x1b0d9b040)), 'PBUI fallbackWallpaperConfigurationForVarient: -> clearColor'),
     ]
     resolved_dsc_patches = []
     for va, data, desc in dsc_extra_patches:
@@ -144,14 +161,10 @@ def main():
         '/System/Library/LaunchDaemons/com.apple.SpringBoard.plist',
         '/System/Library/LaunchDaemons/com.apple.lsd.plist',
         '/System/Library/LaunchDaemons/com.apple.lsd.system.plist',
+        '/System/Library/LaunchDaemons/com.apple.iconservices.iconservicesagent.plist',
         '/System/Library/LaunchDaemons/com.apple.distnoted.xpc.daemon.plist',
         '/System/Library/LaunchDaemons/com.apple.cache_delete.plist',
-        '/System/Library/LaunchDaemons/com.apple.iconservices.iconservicesagent.plist',
         '/System/Library/LaunchDaemons/com.apple.securityd.plist',
-        # MobileInstallation registers the system apps (/Applications/*.app) into LaunchServices;
-        # without it the LS database is empty -> nil SBApplications, no Homescreen icons.
-        '/System/Library/LaunchDaemons/com.apple.mobile.installd.plist',
-        '/System/Library/LaunchDaemons/com.apple.installcoordinationd.plist',
     ]
     loaded_daemons = {}
     for dp in extra_daemons:
@@ -168,9 +181,13 @@ def main():
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.managedconfiguration.profiled.plist', None)
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.mobile.keybagd.plist', None)
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.powerd.plist', None)
+    lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.mobile.installd.plist', None)
+    lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.installcoordinationd.plist', None)
     for dp, d in loaded_daemons.items():
         d.pop('LimitLoadFromHardware', None)
         d.pop('_LimitLoadFromClarityMode', None)
+        if 'iconservicesagent' in dp:
+            d.pop('UserName', None)  # run as root so systemgroup.com.apple.lsd.iconscache is writable
         if 'SpringBoard' in dp:
             d['EmbeddedHomeScreen'] = True
             d['RunAtLoad'] = False
@@ -179,24 +196,30 @@ def main():
             d['RunAtLoad'] = False
         lp['LaunchDaemons'][dp] = d
 
-    # Run UniXNU-merlinx /private/var seeder (85 dirs + 20H392 prefs) at boot
+    # Seed /private/var dirs (90 dirs) + 12 iOS 16.7.16 (20H392) prefs at boot
     lp['LaunchDaemons']['/System/Library/LaunchDaemons/com.darwinfire.seed.plist'] = {
         'Label': 'com.darwinfire.seed',
-        'Program': '/usr/bin/zprint',
         'ProgramArguments': ['/usr/bin/zprint', 'seed'],
         'RunAtLoad': True,
         'StandardOutPath': '/dev/console',
         'StandardErrorPath': '/dev/console',
     }
 
-    # Debug: mirror os_log of SpringBoard + backboardd to the serial console
+    # Keep SpringBoard & backboardd console quiet (avoid 115200-baud /dev/console spam slowing UI/boot);
+    # mirror lsd os_log to /private/var/tmp/lsd.log for boot-time profiling.
     for k, d in lp['LaunchDaemons'].items():
-        if k.endswith('com.apple.SpringBoard.plist') or k.endswith('com.apple.backboardd.plist'):
+        if k.endswith(('com.apple.SpringBoard.plist', 'com.apple.backboardd.plist', 'com.apple.containermanagerd.plist')):
+            env = d.get('EnvironmentVariables')
+            if isinstance(env, dict):
+                env.pop('OS_ACTIVITY_DT_MODE', None)
+            d.pop('StandardErrorPath', None)
+            d.pop('StandardOutPath', None)
+        elif k.endswith('com.apple.lsd.plist'):
             env = d.setdefault('EnvironmentVariables', {})
             env['OS_ACTIVITY_DT_MODE'] = '1'
-            d['StandardErrorPath'] = '/dev/console'
-            d['StandardOutPath'] = '/dev/console'
-            print(f'[+] os_log -> console: {k}')
+            d['StandardErrorPath'] = '/private/var/tmp/lsd.log'
+            d['StandardOutPath'] = '/private/var/tmp/lsd.log'
+            print(f'[+] os_log -> /private/var/tmp/lsd.log: {k}')
 
     new_raw = plistlib.dumps(lp, fmt=plistlib.FMT_BINARY)
     if len(new_raw) > max_bytes:

@@ -518,7 +518,9 @@ static uint64_t dfm_pt_pa;
 static int dfm_comp_state;          /* 0 off, 1 armed (after Ctrl-P), 2 tables built, -1 failed */
 static const uint32_t *dfm_comp_swfb;
 static uint32_t dfm_comp_frames;
-static int dfm_comp_solid;          /* 1: magenta constant shader (fault bisect) */
+static int dfm_comp_solid;          /* bisect variant: 0 main, 1 fc, 2 tex64, 3 solid */
+static uint32_t dfm_var_frames;
+static const char *const dfm_var_name[4] = { "main", "fc (frag coord only)", "tex64 (64B strides)", "solid magenta" };
 
 static uint64_t *
 dfm_pt_alloc(uint64_t *pa)
@@ -604,14 +606,16 @@ dfm_comp_build(const uint32_t *swfb)
 	for (unsigned i = 0; i < 0x2000; i++) {
 		blobk[i] = 0;
 	}
-	if (dfm_comp_solid) {
-		for (unsigned i = 0; i < DF_MALI_SOLID_SIZE; i++) {
-			blobk[i] = df_mali_blob_solid[i];
+	{
+		const uint8_t *src = df_mali_blob;
+		unsigned n = DF_MALI_BLOB_SIZE;
+		if (dfm_comp_solid == 1) { src = df_mali_blob_fc; n = DF_MALI_FC_SIZE; }
+		if (dfm_comp_solid == 2) { src = df_mali_blob_tex64; n = DF_MALI_TEX64_SIZE; }
+		if (dfm_comp_solid == 3) { src = df_mali_blob_solid; n = DF_MALI_SOLID_SIZE; }
+		for (unsigned i = 0; i < n; i++) {
+			blobk[i] = src[i];
 		}
-	} else {
-		for (unsigned i = 0; i < DF_MALI_BLOB_SIZE; i++) {
-			blobk[i] = df_mali_blob[i];
-		}
+		printf("mali: comp variant %d: %s\n", dfm_comp_solid, dfm_var_name[dfm_comp_solid]);
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
@@ -723,12 +727,18 @@ df_mali_compose(const uint32_t *swfb)
 		    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
 	}
 	dfm_comp_frames++;
-	if (!ok && !dfm_comp_solid) {
-		/* bisect: same pipeline, constant-colour shader without textures */
-		printf("mali: texture shader faulted, retrying with the solid magenta shader\n");
-		dfm_comp_solid = 1;
+	printf("mali: variant %d (%s) frame %s\n", dfm_comp_solid, dfm_var_name[dfm_comp_solid], ok ? "OK" : "FAULT");
+	if (dfm_comp_solid < 3 && (!ok || (dfm_comp_solid > 0 && ++dfm_var_frames >= 2))) {
+		/* bisect: try the next shader variant on the same pipeline */
+		dfm_comp_solid++;
+		dfm_var_frames = 0;
 		dfm_comp_state = 1;
-		return df_mali_compose(swfb);
+		return ok ? 0 : df_mali_compose(swfb);
+	}
+	if (dfm_comp_solid == 3 && ok && ++dfm_var_frames >= 2) {
+		printf("mali: bisect done, back to the CPU compositor\n");
+		dfm_comp_state = -1;
+		return 0;
 	}
 	if (!ok) {
 		dfm_comp_state = -1;                            /* fall back to the CPU for good */

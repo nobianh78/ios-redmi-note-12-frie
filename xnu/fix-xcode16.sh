@@ -762,7 +762,7 @@ grep -q '^df_emmc_probe(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo 
 #        P8: FocalTech FT8720 touchscreen over MT6768 SPI2 -> Apple IOHIDEventService.
 cat "$(dirname "$0")/df_touch.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"
 grep -q '^df_touch_start(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_touch.c not appended"; exit 1; }
-cat "$(dirname "$0")/df_mali_blob.h" "$(dirname "$0")/df_mali_blob_solid.h" "$(dirname "$0")/df_mali.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"   # Mali probe + GPU compositor (COM6 Ctrl-P)
+cat "$(dirname "$0")/df_mali_blob.h" "$(dirname "$0")/df_mali_blob_solid.h" "$(dirname "$0")/df_mali_blob_fc.h" "$(dirname "$0")/df_mali_blob_tex64.h" "$(dirname "$0")/df_mali.c" >> "$src/osfmk/arm64/amcc_rorgn_common.c"   # Mali probe + GPU compositor (COM6 Ctrl-P)
 grep -q '^df_mali_probe(void)' "$src/osfmk/arm64/amcc_rorgn_common.c" || { echo "fix-xcode16: df_mali.c not appended"; exit 1; }
 cat "$(dirname "$0")/df_emmc_dev.c" >> "$src/bsd/dev/memdev.c"
 grep -q '^df_emmc_devinit(void)' "$src/bsd/dev/memdev.c" || { echo "fix-xcode16: df_emmc_dev.c not appended"; exit 1; }

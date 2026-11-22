@@ -50,7 +50,7 @@ static uint32_t g_boot_bar_ticks = 0;
 #define DF_WALL_W 544   /* 2176 B rows: 64-byte aligned for the Mali */
 #define DF_WALL_H 1200
 __asm__(".section __TEXT,__const\n"
-        ".p2align 6\n"
+        ".p2align 14\n"   /* page aligned: the Mali maps it with 4K PTEs from page-truncated PAs */
         ".globl _df_wall_px\n"
         "_df_wall_px:\n"
         ".incbin \"@DF_WALL_PATH@\"\n"

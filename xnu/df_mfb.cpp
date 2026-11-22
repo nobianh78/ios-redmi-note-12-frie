@@ -55,6 +55,8 @@ __asm__(".section __TEXT,__const\n"
         ".incbin \"@DF_WALL_PATH@\"\n"
         ".text\n");
 extern "C" const uint32_t df_wall_px[DF_WALL_W * DF_WALL_H];
+/* xnu/df_mali.c: GPU compositor; returns 0 when the Mali drew the frame, -1 -> CPU path */
+extern "C" int df_mali_compose(const uint32_t *swfb);
 
 static void df_flush_fb(void) {
   if (df_wdt) {
@@ -626,6 +628,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
     }
     s_swap_cnt++;
     uint32_t nonblack = 0;
+    int gpu_done = 0;
     uint32_t nonzero = 0;
     if (g_sw_fb_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
@@ -643,7 +646,9 @@ IOReturn DFMobileFramebufferUC::externalMethod(
           g_boot_logo_done = 1;
         }
       }
-      if (g_boot_logo_done) {
+      if (g_boot_logo_done && df_mali_compose(g_sw_fb_kva) == 0) {
+        gpu_done = 1;   /* Mali-G52 composited frame + wallpaper straight into the LCD buffer */
+      } else if (g_boot_logo_done) {
         /* one pass: copy frame, pure-black pixels show the wallpaper (2x upscale) */
         const uint32_t *src = g_sw_fb_kva;
         volatile uint32_t *dst = df_fbva;
@@ -683,7 +688,7 @@ IOReturn DFMobileFramebufferUC::externalMethod(
                g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
-    if (g_boot_logo_done) {
+    if (g_boot_logo_done && !gpu_done) {
       df_flush_fb();
     }
   }

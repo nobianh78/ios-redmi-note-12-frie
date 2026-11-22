@@ -497,4 +497,233 @@ df_mali_frag(void)
 	printf("mali: frag mmu raw 0x%x fault 0x%x addr 0x%x%08x\n", dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT),
 	    dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS), dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_HI),
 	    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
+	if ((raw & 1u) && job[0] == 1) {
+		extern void df_mali_comp_arm(void);
+		df_mali_comp_arm();             /* SwapEnd now composites on the GPU */
+	}
+}
+
+/* ---------------- Phase 3: GPU compositor for SwapEnd (pre-frame shader from Mesa) ---------------- */
+/*
+ * df_mali_blob.h (tools/mali_gen, Mesa panfrost v7) holds a pre-frame Draw + RSD + blend + 2 textures +
+ * sampler + compiled fragment shader, built for fixed GPU VAs: blob @ DF_MALI_BLOB_VA, iOS SW frame @
+ * DF_MALI_SWFB_VA, wallpaper @ DF_MALI_WALL_VA. Here: 4K page tables for those VAs (+ 2 MB identity
+ * blocks for the LCD buffer, job memory and tiler heap), then one fragment job per SwapEnd whose
+ * framebuffer runs the shader on every pixel (Pre Frame 0 = Always) and writes the LCD directly.
+ */
+extern const uint32_t df_wall_px[];
+static uint8_t dfm_pt[0x10000] __attribute__((aligned(0x4000)));   /* L1 + L2s + L3s */
+static unsigned dfm_pt_used;
+static uint64_t dfm_pt_pa;
+static int dfm_comp_state;          /* 0 off, 1 armed (after Ctrl-P), 2 tables built, -1 failed */
+static const uint32_t *dfm_comp_swfb;
+static uint32_t dfm_comp_frames;
+
+static uint64_t *
+dfm_pt_alloc(uint64_t *pa)
+{
+	if (dfm_pt_used + 0x1000 > sizeof(dfm_pt)) {
+		return NULL;
+	}
+	uint64_t *t = (uint64_t *)(dfm_pt + dfm_pt_used);
+	*pa = dfm_pt_pa + dfm_pt_used;
+	dfm_pt_used += 0x1000;
+	return t;
+}
+
+/* next-level table for entry e of table t (creating it if needed) */
+static uint64_t *
+dfm_pt_next(uint64_t *t, unsigned e)
+{
+	if ((t[e] & 3) == 3) {
+		uint64_t pa = t[e] & 0x0000fffffffff000ULL;
+		return (uint64_t *)(dfm_pt + (pa - dfm_pt_pa));
+	}
+	uint64_t pa;
+	uint64_t *n = dfm_pt_alloc(&pa);
+	if (n) {
+		t[e] = pa | 3;
+	}
+	return n;
+}
+
+#define DFM_PTE_ATTR ((1ULL << 6) | (1ULL << 10) | (1ULL << 11))   /* EL0 RW, AF, nG, AttrIdx 0 */
+
+static int
+dfm_map4k(uint64_t va, uint64_t pa)
+{
+	uint64_t *l1 = (uint64_t *)dfm_pt;
+	uint64_t *l2 = dfm_pt_next(l1, (unsigned)(va >> 30));
+	uint64_t *l3 = l2 ? dfm_pt_next(l2, (unsigned)((va >> 21) & 511)) : NULL;
+	if (!l3) {
+		return -1;
+	}
+	l3[(va >> 12) & 511] = (pa & ~0xfffULL) | 3 | DFM_PTE_ATTR;
+	return 0;
+}
+
+static int
+dfm_map_block_gb(uint64_t pa_any)
+{
+	uint64_t *l1 = (uint64_t *)dfm_pt;
+	uint64_t *l2 = dfm_pt_next(l1, (unsigned)(pa_any >> 30));
+	if (!l2) {
+		return -1;
+	}
+	uint64_t gb = pa_any >> 30;
+	for (uint64_t i = 0; i < 512; i++) {
+		if ((l2[i] & 3) != 3) {
+			l2[i] = (gb << 30) | (i << 21) | 1 | DFM_PTE_ATTR;
+		}
+	}
+	return 0;
+}
+
+static int
+dfm_map_kva(uint64_t va, const void *kva, uint64_t len)
+{
+	for (uint64_t off = 0; off < len; off += 0x1000) {
+		uint64_t pa = ml_vtophys((vm_offset_t)kva + off);
+		if (!pa || dfm_map4k(va + off, pa)) {
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int
+dfm_comp_build(const uint32_t *swfb)
+{
+	dfm_pt_pa = ml_vtophys((vm_offset_t)dfm_pt);
+	for (unsigned i = 0; i < sizeof(dfm_pt); i++) {
+		dfm_pt[i] = 0;
+	}
+	dfm_pt_used = 0x1000;                                  /* L1 lives at offset 0 */
+	uint8_t *blobk = dfm_mem + 0x6000;                     /* 4K-aligned copy of the blob */
+	for (unsigned i = 0; i < DF_MALI_BLOB_SIZE; i++) {
+		blobk[i] = df_mali_blob[i];
+	}
+	int e = 0;
+	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
+	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, (uint64_t)DFM_FB_W * DFM_FB_H * 4);
+	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 540ULL * 1200 * 4);
+	e |= dfm_map_block_gb(DFM_FB_PA);
+	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_mem));
+	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_heap));
+	printf("mali: comp tables %s, %u KB used, pt pa 0x%llx, regs %u\n", e ? "FAILED" : "ok",
+	    dfm_pt_used >> 10, dfm_pt_pa, DF_MALI_WORK_REGS);
+	if (e) {
+		return -1;
+	}
+	dfm_clean(dfm_pt, dfm_pt_used);
+	dfm_clean(dfm_mem, sizeof(dfm_mem));
+	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_LO, (uint32_t)dfm_pt_pa);
+	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_HI, (uint32_t)(dfm_pt_pa >> 32));
+	return dfm_as_cmd(1 /* UPDATE */);
+}
+
+/* Called from SwapEnd (df_mfb.cpp). 0 = GPU drew the frame, -1 = use the CPU path. */
+int df_mali_compose(const uint32_t *swfb);
+int
+df_mali_compose(const uint32_t *swfb)
+{
+	if (dfm_comp_state <= 0 || !swfb || !dfm_gpu) {
+		return -1;
+	}
+	if (dfm_comp_state == 1 || swfb != dfm_comp_swfb) {
+		dfm_comp_swfb = swfb;
+		if (dfm_comp_build(swfb)) {
+			dfm_comp_state = -1;
+			return -1;
+		}
+		dfm_comp_state = 2;
+	}
+	uint64_t base = ml_vtophys((vm_offset_t)dfm_mem);
+	uint64_t heap = ml_vtophys((vm_offset_t)dfm_heap);
+	uint32_t *job = (uint32_t *)(dfm_mem + 0x5000);
+	uint32_t *fbd = (uint32_t *)(dfm_mem + 0x5100);
+	uint32_t *rt = fbd + 32;
+	uint32_t *tctx = (uint32_t *)(dfm_mem + 0x5400);
+	uint32_t *theap = (uint32_t *)(dfm_mem + 0x5600);
+	uint16_t *sloc = (uint16_t *)(dfm_mem + 0x5700);
+	for (unsigned i = 0x5000; i < 0x5800; i++) {
+		dfm_mem[i] = 0;
+	}
+	for (int i = 0; i < 64; i++) {
+		sloc[i] = 128;
+	}
+	uint64_t tctx_pa = base + 0x5400, theap_pa = base + 0x5600, sloc_pa = base + 0x5700;
+	theap[1] = 0x40000;
+	theap[2] = (uint32_t)heap;  theap[3] = (uint32_t)(heap >> 32);
+	theap[4] = (uint32_t)heap;  theap[5] = (uint32_t)(heap >> 32);
+	theap[6] = (uint32_t)(heap + 0x40000);  theap[7] = (uint32_t)((heap + 0x40000) >> 32);
+	tctx[2] = 0x28;
+	tctx[3] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);
+	tctx[6] = (uint32_t)theap_pa;  tctx[7] = (uint32_t)(theap_pa >> 32);
+
+	fbd[0] = 1;                                         /* Pre Frame 0 = Always */
+	fbd[4] = (uint32_t)sloc_pa;  fbd[5] = (uint32_t)(sloc_pa >> 32);
+	fbd[6] = (uint32_t)DF_MALI_DCD_VA;  fbd[7] = (uint32_t)(DF_MALI_DCD_VA >> 32);
+	fbd[8] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);
+	fbd[10] = (DFM_FB_W - 1) | ((uint32_t)(DFM_FB_H - 1) << 16);
+	fbd[11] = (8u << 9) | (1u << 24);                   /* 16x16 tiles, 1 RT, 1 KB/tile */
+	fbd[12] = (1u << 29);                               /* write every tile */
+	fbd[14] = (uint32_t)tctx_pa;  fbd[15] = (uint32_t)(tctx_pa >> 32);
+	rt[0] = (1u << 26);
+	rt[1] = 1u | (19u << 3) | (2u << 8) | ((2u | (1u << 3) | (0u << 6) | (3u << 9)) << 16) | (1u << 31);
+	rt[8] = (uint32_t)DFM_FB_PA;  rt[9] = (uint32_t)(DFM_FB_PA >> 32);
+	rt[10] = DFM_FB_W * 4;
+	rt[11] = DFM_FB_W * DFM_FB_H * 4;
+	job[4] = 1u | (9u << 1) | (1u << 16);
+	job[9] = ((DFM_FB_W - 1) >> 4) | (((uint32_t)(DFM_FB_H - 1) >> 4) << 16);
+	uint64_t fbptr = (base + 0x5100) | 1u;
+	job[10] = (uint32_t)fbptr;  job[11] = (uint32_t)(fbptr >> 32);
+
+	uint64_t t0 = mach_absolute_time();
+	/* the CPU rendered into cacheable memory; the GPU reads it non-cacheable */
+	for (uintptr_t a = (uintptr_t)swfb & ~63UL; a < (uintptr_t)swfb + (uintptr_t)DFM_FB_W * DFM_FB_H * 4; a += 64) {
+		__asm__ volatile ("dc cvac, %0" :: "r"(a) : "memory");
+	}
+	dfm_clean(dfm_mem + 0x5000, 0x800);
+	uint64_t t1 = mach_absolute_time();
+	dfm_w(dfm_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+	uint64_t job_pa = base + 0x5000;
+	dfm_w(dfm_gpu, JS0 + JS_HEAD_NEXT_LO, (uint32_t)job_pa);
+	dfm_w(dfm_gpu, JS0 + JS_HEAD_NEXT_HI, (uint32_t)(job_pa >> 32));
+	dfm_w(dfm_gpu, JS0 + JS_AFFINITY_NEXT_LO, 0x3);
+	dfm_w(dfm_gpu, JS0 + JS_AFFINITY_NEXT_HI, 0);
+	dfm_w(dfm_gpu, JS0 + JS_CONFIG_NEXT, 0u | (3u << 8) | (3u << 12) | (8u << 16));
+	dfm_w(dfm_gpu, JS0 + JS_COMMAND_NEXT, 1);
+	uint32_t raw = 0;
+	for (int i = 0; i < 20000; i++) {                   /* <= ~200 ms */
+		raw = dfm_r(dfm_gpu, JOB_IRQ_RAWSTAT);
+		if (raw & ((1u << 0) | (1u << 16))) {
+			break;
+		}
+		dfm_udelay(10);
+	}
+	uint64_t t2 = mach_absolute_time();
+	dfm_clean(job, 64);
+	int ok = (raw & 1u) && !(raw & (1u << 16)) && job[0] == 1;
+	if (!ok || dfm_comp_frames < 5 || (dfm_comp_frames % 300) == 0) {
+		printf("mali: comp #%u %s raw 0x%x exc 0x%x | flush %llu us gpu %llu us | mmu 0x%x fault 0x%x @0x%x\n",
+		    dfm_comp_frames, ok ? "ok" : "FAIL", raw, job[0], (t1 - t0) / 13, (t2 - t1) / 13,
+		    dfm_r(dfm_gpu, MMU_IRQ_RAWSTAT), dfm_r(dfm_gpu, AS0 + AS_FAULTSTATUS),
+		    dfm_r(dfm_gpu, AS0 + AS_FAULTADDR_LO));
+	}
+	dfm_comp_frames++;
+	if (!ok) {
+		dfm_comp_state = -1;                            /* fall back to the CPU for good */
+		return -1;
+	}
+	return 0;
+}
+
+void df_mali_comp_arm(void);
+void
+df_mali_comp_arm(void)
+{
+	dfm_comp_state = 1;
+	dfm_comp_frames = 0;
+	printf("mali: GPU compositor armed (next SwapEnd draws on the Mali)\n");
 }

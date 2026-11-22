@@ -1,0 +1,69 @@
+name: Mali shader generator
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/mali_gen/**'
+      - '.github/workflows/mali-gen.yml'
+
+jobs:
+  gen:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build python3-mako python3-yaml bison flex glslang-tools \
+            libdrm-dev libexpat1-dev zlib1g-dev pkg-config build-essential
+          pip3 install --user 'meson>=1.1' mako pyyaml
+
+      - name: Fetch Mesa 24.0.2
+        run: |
+          curl -fsSL -o mesa.tar.xz https://archive.mesa3d.org/mesa-24.0.2.tar.xz
+          tar xf mesa.tar.xz
+          mv mesa-24.0.2 mesa
+
+      - name: Add df_mali_gen target
+        run: |
+          cp tools/mali_gen/df_mali_gen.c mesa/src/panfrost/lib/
+          cat >> mesa/src/panfrost/lib/meson.build <<'EOF'
+
+          df_mali_gen = executable(
+            'df_mali_gen',
+            files('df_mali_gen.c'),
+            c_args : ['-DPAN_ARCH=7', no_override_init_args],
+            gnu_symbol_visibility : 'hidden',
+            include_directories : [inc_include, inc_src, inc_mesa, inc_mapi, inc_gallium, inc_gallium_aux, inc_panfrost_hw, inc_panfrost],
+            dependencies : [libpanfrost_dep, idep_mesautil],
+          )
+          EOF
+
+      - name: Configure
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd mesa
+          meson setup build \
+            -Dgallium-drivers=panfrost -Dvulkan-drivers= -Dplatforms= \
+            -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dgles1=disabled -Dgles2=disabled \
+            -Dopengl=false -Dllvm=disabled -Dshared-glapi=disabled -Dvalgrind=disabled \
+            -Dlibunwind=disabled -Dzstd=disabled -Dbuildtype=release
+
+      - name: Build df_mali_gen
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd mesa
+          ninja -C build src/panfrost/lib/df_mali_gen
+
+      - name: Generate blob
+        run: |
+          ./mesa/build/src/panfrost/lib/df_mali_gen xnu/df_mali_blob.h
+          head -c 600 xnu/df_mali_blob.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: df-mali-blob
+          path: xnu/df_mali_blob.h

@@ -60,10 +60,12 @@ jobs:
 
       - name: Generate blob
         run: |
-          ./mesa/build/src/panfrost/lib/df_mali_gen xnu/df_mali_blob.h
+          PANDECODE_DUMP_FILE=stderr ./mesa/build/src/panfrost/lib/df_mali_gen xnu/df_mali_blob.h 2>&1 | tee gen.log
           head -c 600 xnu/df_mali_blob.h
 
       - uses: actions/upload-artifact@v4
         with:
           name: df-mali-blob
-          path: xnu/df_mali_blob.h
+          path: |
+            xnu/df_mali_blob.h
+            gen.log

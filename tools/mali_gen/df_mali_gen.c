@@ -19,6 +19,7 @@
 #include "pan_shader.h"
 #include "pan_format.h"
 #include "genxml/gen_macros.h"
+#include "wrap.h"
 
 #define FB_W        1080
 #define FB_H        2400
@@ -220,6 +221,52 @@ main(int argc, char **argv)
    fprintf(f, "\n};\n");
    fclose(f);
    fprintf(stderr, "wrote %s (%u bytes)\n", out_path, blob_size);
+   /* ---- self-check: rebuild the kernel's fragment job (df_mali.c df_mali_compose) and run
+    * Mesa's pandecode over the whole job chain, so descriptor mistakes show up in CI ---- */
+   {
+      const uint64_t JOB_VA = 0x40000000ULL, HEAP_VA = 0x50000000ULL, FB_VA = 0x7ce6a000ULL;
+      static uint8_t jm[0x800] __attribute__((aligned(64)));
+      static uint8_t heapm[0x40000] __attribute__((aligned(4096)));
+      uint32_t *job = (uint32_t *)jm, *fbd = (uint32_t *)(jm + 0x100), *rt = fbd + 32;
+      uint32_t *tctx = (uint32_t *)(jm + 0x400), *theap = (uint32_t *)(jm + 0x600);
+      uint16_t *sloc = (uint16_t *)(jm + 0x700);
+      for (int i = 0; i < 64; i++)
+         sloc[i] = 128;
+      theap[1] = sizeof(heapm);
+      theap[2] = (uint32_t)HEAP_VA;            theap[3] = (uint32_t)(HEAP_VA >> 32);
+      theap[4] = (uint32_t)HEAP_VA;            theap[5] = (uint32_t)(HEAP_VA >> 32);
+      theap[6] = (uint32_t)(HEAP_VA + sizeof(heapm));
+      theap[7] = (uint32_t)((HEAP_VA + sizeof(heapm)) >> 32);
+      tctx[2] = 0x28;
+      tctx[3] = (FB_W - 1) | ((uint32_t)(FB_H - 1) << 16);
+      tctx[6] = (uint32_t)(JOB_VA + 0x600);   tctx[7] = 0;
+      fbd[0] = 1;
+      fbd[4] = (uint32_t)(JOB_VA + 0x700);    fbd[5] = 0;
+      fbd[6] = (uint32_t)(BLOB_VA + OFF_DCD); fbd[7] = (uint32_t)((BLOB_VA + OFF_DCD) >> 32);
+      fbd[8] = (FB_W - 1) | ((uint32_t)(FB_H - 1) << 16);
+      fbd[10] = (FB_W - 1) | ((uint32_t)(FB_H - 1) << 16);
+      fbd[11] = (8u << 9) | (1u << 24);
+      fbd[12] = (1u << 29);
+      fbd[14] = (uint32_t)(JOB_VA + 0x400);   fbd[15] = 0;
+      rt[0] = (1u << 26);
+      rt[1] = 1u | (19u << 3) | (2u << 8) | ((2u | (1u << 3) | (0u << 6) | (3u << 9)) << 16) | (1u << 31);
+      rt[8] = (uint32_t)FB_VA;                rt[9] = 0;
+      rt[10] = FB_W * 4;
+      rt[11] = FB_W * FB_H * 4;
+      job[4] = 1u | (9u << 1) | (1u << 16);
+      job[9] = ((FB_W - 1) >> 4) | (((uint32_t)(FB_H - 1) >> 4) << 16);
+      uint64_t fbptr = (JOB_VA + 0x100) | 1u;
+      job[10] = (uint32_t)fbptr;              job[11] = (uint32_t)(fbptr >> 32);
+
+      struct pandecode_context *ctx = pandecode_create_context(true);
+      pandecode_inject_mmap(ctx, BLOB_VA, blob, BLOB_MAX, "blob");
+      pandecode_inject_mmap(ctx, JOB_VA, jm, sizeof(jm), "jobmem");
+      pandecode_inject_mmap(ctx, HEAP_VA, heapm, sizeof(heapm), "heap");
+      fprintf(stderr, "=== pandecode of the kernel compositor job ===\n");
+      pandecode_jc(ctx, JOB_VA, 0x7402);
+      pandecode_destroy_context(ctx);
+   }
+
    util_dynarray_fini(&binary);
    ralloc_free(b.shader);
    glsl_type_singleton_decref();

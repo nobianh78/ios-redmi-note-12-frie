@@ -148,6 +148,10 @@ def main():
         '/System/Library/LaunchDaemons/com.apple.cache_delete.plist',
         '/System/Library/LaunchDaemons/com.apple.iconservices.iconservicesagent.plist',
         '/System/Library/LaunchDaemons/com.apple.securityd.plist',
+        # MobileInstallation registers the system apps (/Applications/*.app) into LaunchServices;
+        # without it the LS database is empty -> nil SBApplications, no Homescreen icons.
+        '/System/Library/LaunchDaemons/com.apple.mobile.installd.plist',
+        '/System/Library/LaunchDaemons/com.apple.installcoordinationd.plist',
     ]
     loaded_daemons = {}
     for dp in extra_daemons:

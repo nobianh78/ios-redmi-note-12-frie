@@ -61,6 +61,7 @@ jobs:
       - name: Generate blob
         run: |
           PANDECODE_DUMP_FILE=stderr ./mesa/build/src/panfrost/lib/df_mali_gen xnu/df_mali_blob.h 2>&1 | tee gen.log
+          PANDECODE_DUMP_FILE=stderr ./mesa/build/src/panfrost/lib/df_mali_gen xnu/df_mali_blob_solid.h solid 2>&1 | tee gen_solid.log
           head -c 600 xnu/df_mali_blob.h
 
       - uses: actions/upload-artifact@v4
@@ -68,4 +69,6 @@ jobs:
           name: df-mali-blob
           path: |
             xnu/df_mali_blob.h
+            xnu/df_mali_blob_solid.h
             gen.log
+            gen_solid.log

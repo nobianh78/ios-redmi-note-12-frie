@@ -6,6 +6,8 @@
 //   zprint launch <bid>    - open an app by CFBundleIdentifier
 // Built by .github/workflows/dfuicache.yml (iOS SDK), ad-hoc signed with entitlements.plist.
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -81,7 +83,7 @@ static const struct SeedDir kSeedDirs[] = {
     { "db/com.apple.xpc.launchd/system", 0, 0, 0755 },
     { "db/com.apple.xpc.launchd/user", 0, 0, 0755 },
     { "db/com.apple.xpc.launchd/log", 0, 0, 0755 },
-    { "db/lsd", 0, 0, 0755 },
+    { "db/lsd", 501, 501, 0775 },
     { "dmd", 0, 0, 0755 },
     { "empty", 0, 0, 0555 },
     { "folders", 0, 0, 0755 },
@@ -228,6 +230,65 @@ static void run_seed(void)
             @"com.apple.control-center.CameraModule",
         ],
     });
+
+    // Fix permissions on existing System container subdirs (containermanagerd created some 0000)
+    // so lsd (UID 501) can persist its .csstore cache across reboots.
+    {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *sysRoot = @"/private/var/containers/Data/System";
+        for (NSString *uuid in [fm contentsOfDirectoryAtPath:sysRoot error:nil]) {
+            NSString *cdir = [sysRoot stringByAppendingPathComponent:uuid];
+            chmod(cdir.UTF8String, 0755);
+            for (NSString *sub in @[@"Library", @"Library/Caches", @"Library/Caches/com.apple.LaunchServices", @"tmp"]) {
+                NSString *sp = [cdir stringByAppendingPathComponent:sub];
+                struct stat st;
+                if (stat(sp.UTF8String, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    chmod(sp.UTF8String, 0777);
+                }
+            }
+        }
+    }
+
+    // Seed native iOS 16 static wallpaper (.cpbitmap) from SydneyWallpaper.jpg so
+    // PBUIWallpaperViewController draws the real wallpaper natively inside SpringBoard
+    // (giving real blurred wallpaper in Control Center / Dock / Quick Actions and zero bleed).
+    {
+        NSString *lockCp = @"/private/var/mobile/Library/SpringBoard/LockBackground.cpbitmap";
+        NSString *homeCp = @"/private/var/mobile/Library/SpringBoard/HomeBackground.cpbitmap";
+        struct stat st;
+        if (stat(lockCp.UTF8String, &st) != 0 || st.st_size < 4096) {
+            @try {
+                NSString *src = @"/System/Library/PrivateFrameworks/Settings/DisplayAndBrightnessSettings.framework/ContinuousExposeLayout-Light-LTR.ca/assets/SydneyWallpaper.jpg";
+                UIImage *img = [UIImage imageWithContentsOfFile:src];
+                void *h = dlopen("/System/Library/PrivateFrameworks/PaperBoardUI.framework/PaperBoardUI", RTLD_NOW);
+                Class storeCls = h ? NSClassFromString(@"PBUIWallpaperDirectoryDataStore") : Nil;
+                if (img && storeCls) {
+                    NSURL *sbDir = [NSURL fileURLWithPath:@"/private/var/mobile/Library/SpringBoard" isDirectory:YES];
+                    SEL initSel = NSSelectorFromString(@"initWithDirectoryURL:");
+                    SEL setSel = NSSelectorFromString(@"setWallpaperImage:forVariant:wallpaperMode:");
+                    id rawStore = [storeCls alloc];
+                    if ([rawStore respondsToSelector:initSel]) {
+                        typedef id (*InitFn)(id, SEL, NSURL *);
+                        InitFn initFn = (InitFn)[rawStore methodForSelector:initSel];
+                        id store = initFn(rawStore, initSel, sbDir);
+                        if (store && [store respondsToSelector:setSel]) {
+                            typedef BOOL (*SetImgFn)(id, SEL, UIImage *, NSInteger, NSInteger);
+                            SetImgFn fn = (SetImgFn)[store methodForSelector:setSel];
+                            BOOL ok0 = fn(store, setSel, img, 0, 0);
+                            BOOL ok1 = fn(store, setSel, img, 1, 0);
+                            chown(lockCp.UTF8String, 501, 501);
+                            chmod(lockCp.UTF8String, 0644);
+                            chown(homeCp.UTF8String, 501, 501);
+                            chmod(homeCp.UTF8String, 0644);
+                            out([NSString stringWithFormat:@"dfuicache: seeded native wallpaper cpbitmap lock=%d home=%d", ok0, ok1]);
+                        }
+                    }
+                }
+            } @catch (NSException *ex) {
+                out([NSString stringWithFormat:@"dfuicache: wallpaper seed skipped (%@)", ex]);
+            }
+        }
+    }
 
     out([NSString stringWithFormat:@"dfuicache: seeded %zu dirs (%d new) + 12 prefs (build %@)",
          n, created, buildVer]);

@@ -748,7 +748,7 @@ dft_thread(void *arg __unused, int wait __unused)
 	for (;;) {
 		if (df_mali_auto_arm == 1) {
 			df_mali_auto_arm = 2;
-			IOSleep(1500);
+			IOSleep(400);
 			extern void df_mali_probe(void);
 			extern int df_mali_is_armed(void);
 			printf("mali: auto-arming GPU compositor...\n");

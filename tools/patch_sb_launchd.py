@@ -149,6 +149,9 @@ def main():
         (0x1c5b036a0, struct.pack('<I', qc.enc_b(0x1c5b036a0, 0x1c5b03754)), 'SBWallpaperController -> b PBUIWallpaperViewController (skip PosterBoard Metal)'),
         # PaperBoardUI: fallback color wallpaper -> clearColor (so GPU composites df_wall_px if cpbitmap missing, zero bleed!)
         (0x1b0d04fc8, struct.pack('<I', qc.enc_bl(0x1b0d04fc8, 0x1b0d9b040)), 'PBUI fallbackWallpaperConfigurationForVarient: -> clearColor'),
+        # ChronoServices (.05): disable tight reconnect loop to absent com.apple.chronoservices (was burning 100% CPU in SpringBoard + launchd!)
+        (0x192123a4c, struct.pack('<I', 0xd65f03c0), '-[CHSChronoServicesConnection _queue_createConnection] -> ret'),
+        (0x19212c0ec, struct.pack('<I', 0xd65f03c0), '-[CHSWidgetEventServicePublisher/Tool _queue_createConnection] -> ret'),
     ]
     resolved_dsc_patches = []
     for va, data, desc in dsc_extra_patches:
@@ -161,7 +164,6 @@ def main():
         '/System/Library/LaunchDaemons/com.apple.SpringBoard.plist',
         '/System/Library/LaunchDaemons/com.apple.lsd.plist',
         '/System/Library/LaunchDaemons/com.apple.lsd.system.plist',
-        '/System/Library/LaunchDaemons/com.apple.iconservices.iconservicesagent.plist',
         '/System/Library/LaunchDaemons/com.apple.distnoted.xpc.daemon.plist',
         '/System/Library/LaunchDaemons/com.apple.cache_delete.plist',
         '/System/Library/LaunchDaemons/com.apple.securityd.plist',
@@ -183,6 +185,7 @@ def main():
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.powerd.plist', None)
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.mobile.installd.plist', None)
     lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.installcoordinationd.plist', None)
+    lp['LaunchDaemons'].pop('/System/Library/LaunchDaemons/com.apple.iconservices.iconservicesagent.plist', None)
     for dp, d in loaded_daemons.items():
         d.pop('LimitLoadFromHardware', None)
         d.pop('_LimitLoadFromClarityMode', None)

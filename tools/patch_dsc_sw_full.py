@@ -94,12 +94,13 @@ def main():
     patches = [
         (0x1882eafa4, struct.pack('<I', 0xd503201f), 'nop (skip EAGL fallback)'),
         (0x1882eafc4, struct.pack('<I', enc_bl(0x1882eafc4, 0x1884409d0)), 'bl SWContext::new'),
-        (0x1882eb0d8, tramp, 'SWContext::set_destination_surface offscreen-preserving IOSurface fallback trampoline'),
+        (0x1882eb0d8, tramp, 'SWContext::set_destination_surface spare fallback cave'),
         (0x1884053c8, struct.pack('<I', 0x52800000), 'restore vtable +0x20 to mov w0, #0'),
         (0x1884053e4, struct.pack('<I', 0x52800020), 'mov w0, #1 (SWContext::supports_iosurface vtable +0x40)'),
         (0x1884053ec, struct.pack('<I', 0x92800000), 'mov x0, #-1 (SWContext::supported_surface_flags vtable +0x48)'),
         (0x188445294, struct.pack('<I', 0xd10283ff), 'RESTORE SWContext::set_destination_surface prologue (sub sp, sp, #0xa0)'),
-        (0x188445304, struct.pack('<I', enc_b(0x188445304, 0x1882eb0d8)), 'b trampoline (only when Surface->lock_cpu fails -> display IOSurface)'),
+        (0x188445304, struct.pack('<I', 0x340005e0), 'RESTORE cbz w0, #0x1884453c0 (IOSurfaceSurface::lock_cpu works natively!)'),
+        (0x188445378, struct.pack('<I', 0xd503201f), 'nop (treat BGRA & non-L008/L555/L565/A008 IOSurface formats as 32bpp BGRA)'),
     ]
 
     total_blocks = os.path.getsize(IMG_PATH) // BS

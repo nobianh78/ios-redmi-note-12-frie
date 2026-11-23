@@ -823,6 +823,26 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
   }
   if ((selector == 0 || selector == 34 || a->structureOutputSize >= 0xa68) &&
       a->structureOutput && a->structureOutputSize >= 0xa68) {
+    /* Only backboardd owns the single display IOSurface (g_sw_fb_md).
+     * Rejecting IOSurfaceCreate/Lookup for other processes (SpringBoard,
+     * SBRendererService, Preferences) makes UIKit/CPBitmap/QuartzCore fall
+     * back cleanly to CPU CGImage / CA::Render::Shmem instead of mapping and
+     * overwriting backboardd's live display framebuffer! */
+    const char *pname = NULL;
+    if (kernproc != NULL && current_task() != kernel_task) {
+      proc_t curp = current_proc();
+      if (curp != NULL && curp != kernproc) {
+        pname = proc_best_name(curp);
+      }
+    }
+    if (!pname || strcmp(pname, "backboardd") != 0) {
+      static unsigned s_rej_logs = 0;
+      if (s_rej_logs++ < 10) {
+        printf("ios: reject sel %u from %s (pid %d)\n", selector,
+               pname ? pname : "?", proc_selfpid());
+      }
+      return kIOReturnUnsupported;
+    }
     uint8_t *out = (uint8_t *)a->structureOutput;
     task_t t = fTask ? fTask : current_task();
     vm_map_t map = t ? get_task_map(t) : NULL;
@@ -884,24 +904,31 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
       target_sid = (uint32_t)a->scalarInput[0];
     }
 
-    /* Fill IOSurface layout matching IOSurface.framework disassembly */
+    /* Fill IOSurface layout matching IOSurface.framework disassembly
+     * (IOSurfaceClient copies out+0x00.. to client+0x68..):
+     *   out+0x20 -> client+0x88: width
+     *   out+0x24 -> client+0x8c: height
+     *   out+0x28 -> client+0x90: bytes_per_row
+     *   out+0x2c -> client+0x94: base_offset
+     *   out+0x30 -> client+0x98: pixel_format ('BGRA')
+     *   out+0x38 -> client+0xa0: plane_count (0 = single-plane BGRA)
+     *   out+0x40 -> client+0xa8: bytes_per_element (4) */
     *(uint64_t *)(out + 0x00) =
-        (uint64_t)user_fb_addr; /* BaseAddress (returned by
-                                   _IOSurfaceClientGetBaseAddressOfPlane) */
+        (uint64_t)user_fb_addr; /* BaseAddress (client+0x68) */
     *(uint64_t *)(out + 0x08) = (uint64_t)
-        user_addr; /* mapped comm page (offset 0x70 in IOSurfaceClient) */
+        user_addr; /* mapped comm page (client+0x70) */
     *(uint64_t *)(out + 0x10) = 0;          /* detach/plane pointer */
-    *(uint32_t *)(out + 0x18) = target_sid; /* surface_id */
+    *(uint32_t *)(out + 0x18) = target_sid; /* surface_id (client+0x80) */
     *(uint32_t *)(out + 0x1c) =
-        DF_MFB_STRIDE_PX * DF_MFB_H * 4;              /* alloc_size = 10,368,000 */
-    *(uint32_t *)(out + 0x20) = DF_MFB_W;     /* width = 1080 */
-    *(uint32_t *)(out + 0x24) = DF_MFB_H;     /* height = 2400 */
-    *(uint32_t *)(out + 0x28) = DF_MFB_STRIDE_PX * 4; /* bytes_per_row = 4352: Mali needs 64-byte aligned texture rows */
-    *(uint32_t *)(out + 0x2c) = 0;            /* plane 0 offset = 0 */
-    *(uint32_t *)(out + 0x30) =
-        DF_MFB_STRIDE_PX * DF_MFB_H * 4;            /* plane 0 size = 10,368,000 */
-    *(uint32_t *)(out + 0x34) = 0x42475241; /* pixel_format = 'BGRA' */
-    *(uint32_t *)(out + 0x38) = 1;          /* plane_count = 1 */
+        DF_MFB_STRIDE_PX * DF_MFB_H * 4;    /* alloc_size (client+0x84) */
+    *(uint32_t *)(out + 0x20) = DF_MFB_W;   /* width = 720 (client+0x88) */
+    *(uint32_t *)(out + 0x24) = DF_MFB_H;   /* height = 1600 (client+0x8c) */
+    *(uint32_t *)(out + 0x28) = DF_MFB_STRIDE_PX * 4; /* bytes_per_row = 2880 (client+0x90) */
+    *(uint32_t *)(out + 0x2c) = 0;          /* offset = 0 (client+0x94) */
+    *(uint32_t *)(out + 0x30) = 0x42475241; /* pixel_format = 'BGRA' (client+0x98) */
+    *(uint32_t *)(out + 0x34) = 0;          /* reserved (client+0x9c) */
+    *(uint32_t *)(out + 0x38) = 0;          /* plane_count = 0: single-plane BGRA (client+0xa0) */
+    *(uint16_t *)(out + 0x40) = 4;          /* bytes_per_element = 4 (client+0xa8) */
     *(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset (alt) */
     *(uint32_t *)(out + 0x124) = 0;         /* plane 0 format flag */
     if (a->scalarOutputCount >= 1) {

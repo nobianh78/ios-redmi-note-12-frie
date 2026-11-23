@@ -218,11 +218,11 @@ def main():
             d.pop('StandardErrorPath', None)
             d.pop('StandardOutPath', None)
         elif k.endswith('com.apple.lsd.plist'):
-            env = d.setdefault('EnvironmentVariables', {})
-            env['OS_ACTIVITY_DT_MODE'] = '1'
-            d['StandardErrorPath'] = '/private/var/tmp/lsd.log'
-            d['StandardOutPath'] = '/private/var/tmp/lsd.log'
-            print(f'[+] os_log -> /private/var/tmp/lsd.log: {k}')
+            env = d.get('EnvironmentVariables')
+            if isinstance(env, dict):
+                env.pop('OS_ACTIVITY_DT_MODE', None)
+            d.pop('StandardErrorPath', None)
+            d.pop('StandardOutPath', None)
 
     new_raw = plistlib.dumps(lp, fmt=plistlib.FMT_BINARY)
     if len(new_raw) > max_bytes:

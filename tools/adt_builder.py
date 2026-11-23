@@ -152,14 +152,14 @@ def build_fire_adt() -> bytes:
     product.add_property("home-button-type", u32(2))
     product.add_property("artwork-device-subtype", u32(2436))
     product.add_property("artwork-device-idiom", cstr("phone"))
-    # Render iOS at 720x1600 @2x (= 360x800 pt, identical logical UI to 1080x2400 @3x)
-    # for 2.25x faster CPU SWContext rendering, upscaled bilinearly to 1080x2400 on Mali-G52.
-    product.add_property("artwork-scale-factor", u32(2))
+    # Native 1080x2400 @3x (= 360x800 pt, exact iPhone X proportions & razor-sharp pixels;
+    # artwork-device-subtype=2436 forces @3x in UIKit, so 720p looked 1.5x oversized).
+    product.add_property("artwork-scale-factor", u32(3))
     product.add_property("product-description", cstr("iPhone X"))
-    product.add_property("main-screen-scale", u32(2))
-    product.add_property("main-screen-width", u32(720))
-    product.add_property("main-screen-height", u32(1600))
-    product.add_property("main-screen-pitch", u32(267))
+    product.add_property("main-screen-scale", u32(3))
+    product.add_property("main-screen-width", u32(1080))
+    product.add_property("main-screen-height", u32(2400))
+    product.add_property("main-screen-pitch", u32(401))
     product.add_property("main-screen-class", u32(18))
     product.add_property("device-perf-memory-class", u32(1))
     root.add_child(product)

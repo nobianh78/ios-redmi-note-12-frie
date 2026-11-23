@@ -6,8 +6,8 @@
  * GPU VA DF_MALI_BLOB_VA, containing a pre-frame DCD (Draw) + Renderer State + Blend + Textures +
  * Sampler + Viewport + positions + TLS + the compiled fragment shader:
  *
- *   c   = textureLod(tex0 = iOS SW frame  720x1600 BGRA @ 0x20000000, uv0, 0)  (bilinear 1.5x upscale)
- *   w   = textureLod(tex1 = wallpaper     544x1200 BGRA @ 0x30000000, uv1, 0)  (bilinear 2.0x upscale)
+ *   c   = texelFetch(tex0 = iOS SW frame 1080x2400 BGRA stride 4352 @ 0x20000000, xy, 0)
+ *   w   = texelFetch(tex1 = wallpaper     544x1200 BGRA stride 2176 @ 0x30000000, xy >> 1, 0)
  *   out = vec4(c.rgb + w.rgb * (1 - c.a), 1)                                   (true premultiplied alpha)
  *
  * The kernel points Framebuffer Parameters "Frame Shader DCDs" at DF_MALI_DCD_VA with
@@ -21,12 +21,12 @@
 #include "genxml/gen_macros.h"
 #include "wrap.h"
 
-#define SW_W        720
-#define SW_H        1600
+#define SW_W        1080
+#define SW_H        2400
+#define SW_STRIDE   (1088 * 4) /* 4352 B = 68 * 64 B (natively 64-byte aligned!) */
 #define FB_W        1080
 #define FB_H        2400
 #define WALL_W      544
-#define WALL_ACTIVE 540
 #define WALL_H      1200
 #define BLOB_VA     0x10000000ULL
 #define SWFB_VA     0x20000000ULL
@@ -47,17 +47,17 @@
 static uint8_t blob[BLOB_MAX];
 
 static nir_def *
-txl(nir_builder *b, unsigned idx, nir_def *uv)
+txf(nir_builder *b, unsigned idx, nir_def *coord)
 {
    nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
-   tex->op = nir_texop_txl;
+   tex->op = nir_texop_txf;
    tex->dest_type = nir_type_float32;
    tex->texture_index = idx;
-   tex->sampler_index = idx;
+   tex->sampler_index = 0;
    tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
    tex->coord_components = 2;
-   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(b, 0.0f));
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
    nir_def_init(&tex->instr, &tex->def, 4, 32);
    nir_builder_instr_insert(b, &tex->instr);
    return &tex->def;
@@ -95,14 +95,11 @@ main(int argc, char **argv)
       nir_store_var(&b, out, nir_vec4(&b, nir_channel(&b, f, 0), nir_channel(&b, f, 1),
                                       nir_imm_float(&b, 0.5), nir_imm_float(&b, 1.0)), 0xf);
    } else {
-   nir_def *fc = nir_trim_vector(&b, nir_load_frag_coord(&b), 2);
-   /* Hardware bilinear 1.5x upscale from 720x1600 (2880 B stride, natively 64B-aligned) to 1080x2400 */
-   nir_def *uv0 = nir_fmul(&b, fc, nir_imm_vec2(&b, 1.0f / (float)FB_W, 1.0f / (float)FB_H));
-   nir_def *uv1 = nir_fmul(&b, fc,
-                           nir_imm_vec2(&b, (float)WALL_ACTIVE / ((float)WALL_W * (float)FB_W),
-                                        1.0f / (float)FB_H));
-   nir_def *c = txl(&b, 0, uv0);
-   nir_def *w = txl(&b, 1, uv1);
+   nir_def *fc = nir_load_frag_coord(&b);
+   nir_def *xy = nir_f2i32(&b, nir_trim_vector(&b, fc, 2));
+   /* Native 1:1 1080x2400 texelFetch (4352 B = 1088*4 natively 64B-aligned stride, razor sharp!) */
+   nir_def *c = txf(&b, 0, xy);
+   nir_def *w = txf(&b, 1, nir_ushr_imm(&b, xy, 1));
    /* True premultiplied Porter-Duff source-over using SWContext real alpha (c.a):
     * opaque black UI (Home Bar, dark icons, Settings) has c.a=1.0 -> zero wallpaper bleed. */
    nir_def *a = nir_channel(&b, c, 3);
@@ -126,7 +123,6 @@ main(int argc, char **argv)
       BITSET_SET(b.shader->info.textures_used, 0);
       BITSET_SET(b.shader->info.textures_used, 1);
       BITSET_SET(b.shader->info.samplers_used, 0);
-      BITSET_SET(b.shader->info.samplers_used, 1);
    }
    pan_shader_preprocess(b.shader, inputs.gpu_id);
    GENX(pan_shader_compile)(b.shader, &inputs, &binary, &info);
@@ -140,8 +136,8 @@ main(int argc, char **argv)
    /* Surfaces + textures */
    pan_pack(blob + OFF_SURF, SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = SWFB_VA;
-      cfg.row_stride = SW_W * 4;        /* 2880 B = 45 * 64 B (natively 64-byte aligned!) */
-      cfg.surface_stride = SW_W * 4 * SW_H;
+      cfg.row_stride = SW_STRIDE;        /* 4352 B = 68 * 64 B (natively 64-byte aligned!) */
+      cfg.surface_stride = SW_STRIDE * SW_H;
    }
    pan_pack(blob + OFF_SURF + pan_size(SURFACE_WITH_STRIDE), SURFACE_WITH_STRIDE, cfg) {
       cfg.pointer = WALL_VA;
@@ -163,17 +159,14 @@ main(int argc, char **argv)
          cfg.surfaces = BLOB_VA + OFF_SURF + t * pan_size(SURFACE_WITH_STRIDE);
       }
    }
-   /* Hardware bilinear samplers with normalized UVs and clamp-to-edge */
-   for (unsigned s = 0; s < 2; s++) {
-      pan_pack(blob + OFF_SAMP + s * pan_size(SAMPLER), SAMPLER, cfg) {
-         cfg.normalized_coordinates = true;
-         cfg.minify_nearest = false;
-         cfg.magnify_nearest = false;
-         cfg.wrap_mode_s = MALI_WRAP_MODE_CLAMP_TO_EDGE;
-         cfg.wrap_mode_t = MALI_WRAP_MODE_CLAMP_TO_EDGE;
-         cfg.wrap_mode_r = MALI_WRAP_MODE_CLAMP_TO_EDGE;
-         cfg.clamp_integer_array_indices = false;
-      }
+   pan_pack(blob + OFF_SAMP, SAMPLER, cfg) {
+      cfg.normalized_coordinates = false;
+      cfg.minify_nearest = true;
+      cfg.magnify_nearest = true;
+      cfg.wrap_mode_s = MALI_WRAP_MODE_CLAMP_TO_EDGE;
+      cfg.wrap_mode_t = MALI_WRAP_MODE_CLAMP_TO_EDGE;
+      cfg.wrap_mode_r = MALI_WRAP_MODE_CLAMP_TO_EDGE;
+      cfg.clamp_integer_array_indices = false;
    }
 
    /* Viewport, positions, TLS */

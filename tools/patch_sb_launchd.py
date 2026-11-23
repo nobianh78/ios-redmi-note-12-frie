@@ -23,11 +23,20 @@ IMG_PATH = 'ios16_root.img'
 OUT_SIMG = 'out/quartzcore_sw_sb.simg'
 
 
-def enc_adrp(pc, target_page):
+def enc_adrp(pc, target_page, rd=8):
     imm = (target_page >> 12) - (pc >> 12)
     immlo = imm & 3
     immhi = (imm >> 2) & 0x7ffff
-    return (1 << 31) | (immlo << 29) | (0x10 << 24) | (immhi << 5) | 8  # x8
+    return (1 << 31) | (immlo << 29) | (0x10 << 24) | (immhi << 5) | (rd & 0x1f)
+
+
+def enc_add_imm(rd, rn, imm12):
+    return 0x91000000 | ((imm12 & 0xfff) << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f)
+
+
+def enc_cbz(rt, pc, target, nz=False):
+    imm19 = ((target - pc) >> 2) & 0x7ffff
+    return (0xb5000000 if nz else 0xb4000000) | (imm19 << 5) | (rt & 0x1f)
 
 
 def main():
@@ -152,6 +161,71 @@ def main():
         # ChronoServices (.05): disable tight reconnect loop to absent com.apple.chronoservices (was burning 100% CPU in SpringBoard + launchd!)
         (0x192123a4c, struct.pack('<I', 0xd65f03c0), '-[CHSChronoServicesConnection _queue_createConnection] -> ret'),
         (0x19212c0ec, struct.pack('<I', 0xd65f03c0), '-[CHSWidgetEventServicePublisher/Tool _queue_createConnection] -> ret'),
+        # CoreFoundation (.03): __CFGetProductName() AND its 6 inlined CFBundle call sites all invoke
+        # dispatch_once block __CFGetProductName_block_invoke @ 0x186ec82bc (storing into [0x1e1d48300]).
+        # Patch BOTH the dispatch_once block (0x186ec82bc) AND __CFGetProductName (0x186ed0168) to set/return
+        # constant CFSTR("iphone") @ 0x1df281c30 so ALL ~iphone resource lookups (DefaultModuleSettings~iphone.plist
+        # for Control Center 2x2/1x2 layout, DefaultIconState~iphone.plist, etc.) succeed!
+        (0x186ec82bc, struct.pack('<IIIII',
+            enc_adrp(0x186ec82bc, 0x1df281000, rd=8),
+            enc_add_imm(8, 8, 0xc30),
+            enc_adrp(0x186ec82c4, 0x1e1d48000, rd=9),
+            0xf9018128,  # str x8, [x9, #0x300]
+            0xd65f03c0,  # ret
+        ), '__CFGetProductName_block_invoke -> [0x1e1d48300] = @"iphone" (fixes ALL 6 inlined CFBundle ~iphone sites!)'),
+        (0x186ed0168, struct.pack('<III', enc_adrp(0x186ed0168, 0x1df281000, rd=0), enc_add_imm(0, 0, 0xc30), 0xd65f03c0),
+         '__CFGetProductName -> return @"iphone"'),
+        # UIKitCore (.03): enable Apple built-in software coordinate edge detection (options |= 1) on UIScreenEdgePanGestureRecognizer,
+        # bypassing _UISEEdgeTypeFailGestureFeature & _UISEPerTypeEdgesFailGestureFeature (which failed every FocalTech touch because _edgeType==0!),
+        # and widen edgeRegionSize / bottomEdgeRegionSize from 13/11pt to 28pt (iPhone X thin-bezel comfort zone for Home Bar swipe-up).
+        (0x188efa754, struct.pack('<I', 0x52800036), 'UIScreenEdgePanGR _commonInit: and w22,w2,#1 -> mov w22,#1 (pure-geometry Home Bar edge detection)'),
+        (0x1896c5604, struct.pack('<I', 0x52800002), '_UIScreenEdgePanRecognizer initWithType:settings:: shouldUseGrapeFlags=0'),
+        (0x188e80194, struct.pack('<I', 0x1e679008), '_UISEGestureFeatureSettings init: edgeRegionSize 13.0pt -> 28.0pt'),
+        (0x189ea9950, struct.pack('<d', 28.0), '_UISEGestureFeatureSettings init: bottomEdgeRegionSize 11.0pt -> 28.0pt'),
+        # IconServices (.13): generate real app icons directly in-process via -[ISGenerationRequest generateImage]
+        # instead of XPC to disabled iconservicesagent (which crashed on nil container_system_group_path_for_identifier).
+        # 1) -[ISConcreteIcon generateImageWithDescriptor:] @ 0x1a7b4d654 (x19=self, x20=desc+1, x21=req+1 -> epilogue @ 0x1a7b4d714)
+        (0x1a7b4d654, struct.pack('<15I',
+            0xaa1503e0,                          # mov  x0, x21  (ISGenerationRequest*)
+            qc.enc_bl(0x1a7b4d658, 0x1a7b5c954), # bl   -[ISGenerationRequest generateImage]
+            qc.enc_bl(0x1a7b4d65c, 0x1a946491c), # bl   objc_claimAutoreleasedReturnValue
+            0xaa0003f6,                          # mov  x22, x0  (IFImage* +1)
+            enc_cbz(22, 0x1a7b4d664, 0x1a7b4d680, nz=True), # cbnz x22, done
+            0xaa1303e0,                          # mov  x0, x19  (self)
+            0xaa1403e2,                          # mov  x2, x20  (descriptor)
+            0x52800003,                          # mov  w3, #0   (markAsPlaceholder=NO)
+            qc.enc_bl(0x1a7b4d674, 0x1a7b89cc0), # bl   -[_placeholderImageWithImageDescriptor:markAsPlaceholder:]
+            qc.enc_bl(0x1a7b4d678, 0x1a946491c), # bl   objc_claimAutoreleasedReturnValue
+            0xaa0003f6,                          # mov  x22, x0
+            qc.enc_bl(0x1a7b4d680, 0x1a9464a00), # bl   objc_release_x21 (req)
+            qc.enc_bl(0x1a7b4d684, 0x1a94649f4), # bl   objc_release_x20 (descriptor)
+            0xaa1603f5,                          # mov  x21, x22 (epilogue moves x21->x0 & tail-calls objc_autoreleaseReturnValue)
+            qc.enc_b(0x1a7b4d68c, 0x1a7b4d714),  # b    epilogue
+        ), '-[ISConcreteIcon generateImageWithDescriptor:] -> in-process [req generateImage]'),
+        # 2) -[ISConcreteIcon generateImageWithDescriptor:completion:] @ 0x1a7b4aeac (x20=self, x22=desc+1, x19=completion+1, x21=req+1 -> epilogue @ 0x1a7b4af80)
+        (0x1a7b4aeac, struct.pack('<21I',
+            0xaa1503e0,                          # mov  x0, x21  (ISGenerationRequest*)
+            qc.enc_bl(0x1a7b4aeb0, 0x1a7b5c954), # bl   -[ISGenerationRequest generateImage]
+            qc.enc_bl(0x1a7b4aeb4, 0x1a946491c), # bl   objc_claimAutoreleasedReturnValue
+            0xaa0003f7,                          # mov  x23, x0  (IFImage* +1)
+            enc_cbz(23, 0x1a7b4aebc, 0x1a7b4aed8, nz=True), # cbnz x23, invoke
+            0xaa1403e0,                          # mov  x0, x20  (self)
+            0xaa1603e2,                          # mov  x2, x22  (descriptor)
+            0x52800003,                          # mov  w3, #0   (markAsPlaceholder=NO)
+            qc.enc_bl(0x1a7b4aecc, 0x1a7b89cc0), # bl   -[_placeholderImageWithImageDescriptor:markAsPlaceholder:]
+            qc.enc_bl(0x1a7b4aed0, 0x1a946491c), # bl   objc_claimAutoreleasedReturnValue
+            0xaa0003f7,                          # mov  x23, x0
+            enc_cbz(19, 0x1a7b4aed8, 0x1a7b4aeec, nz=False), # cbz  x19, cleanup
+            0xaa1303e0,                          # mov  x0, x19  (completion block)
+            0xf9400a68,                          # ldr  x8, [x19, #0x10] (block->invoke)
+            0xaa1703e1,                          # mov  x1, x23  (IFImage*)
+            0xd63f0100,                          # blr  x8
+            qc.enc_bl(0x1a7b4aeec, 0x1a9464a18), # bl   objc_release_x23 (img)
+            qc.enc_bl(0x1a7b4aef0, 0x1a9464a00), # bl   objc_release_x21 (req)
+            qc.enc_bl(0x1a7b4aef4, 0x1a9464a0c), # bl   objc_release_x22 (descriptor)
+            qc.enc_bl(0x1a7b4aef8, 0x1a94649e8), # bl   objc_release_x19 (completion)
+            qc.enc_b(0x1a7b4aefc, 0x1a7b4af80),  # b    epilogue
+        ), '-[ISConcreteIcon generateImageWithDescriptor:completion:] -> in-process [req generateImage]'),
     ]
     resolved_dsc_patches = []
     for va, data, desc in dsc_extra_patches:
@@ -249,9 +323,11 @@ def main():
         for va, off, data, desc in resolved_dsc_patches:
             f.seek(off)
             f.write(data)
-            blk = off // BS
-            touched_blocks.add(blk)
-            print(f'[+] Patched {hex(va)} @ disk {hex(off)} (blk {blk}): {desc}')
+            blk_start = off // BS
+            blk_end = (off + len(data) - 1) // BS
+            for b in range(blk_start, blk_end + 1):
+                touched_blocks.add(b)
+            print(f'[+] Patched {hex(va)} @ disk {hex(off)} (blk {blk_start}..{blk_end}): {desc}')
 
         padded = new_raw + b'\x00' * (max_bytes - len(new_raw))
         f.seek(lp_start_blk * BS)

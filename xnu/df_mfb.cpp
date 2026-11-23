@@ -7,6 +7,7 @@
  * which selectors backboardd/QuartzCore need. clientMemoryForType hands out the
  * MT6768 framebuffer the df console draws into. */
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOUserClient.h>
@@ -47,6 +48,28 @@ extern "C" volatile int df_mali_auto_arm;
 static mach_vm_address_t g_user_fb_addr = 0;
 static IOBufferMemoryDescriptor *g_sw_fb_md = NULL;
 static uint32_t *g_sw_fb_kva = NULL;
+
+#define DF_IOS_MAX_SURFACES 64
+#define DF_IOS_MAX_POOL_BYTES (128u * 1024u * 1024u)
+
+struct DFIOSurfaceSlot {
+  bool in_use;
+  uint32_t width;
+  uint32_t height;
+  uint32_t bytes_per_row;
+  uint32_t bytes_per_elem;
+  uint32_t pixel_format;
+  uint32_t alloc_size;
+  uint32_t seed;
+  int32_t refcnt;
+  IOBufferMemoryDescriptor *md;
+  uint32_t *kva;
+};
+
+static DFIOSurfaceSlot g_ios_surfaces[DF_IOS_MAX_SURFACES];
+static IOLock *g_ios_lock = NULL;
+static uint64_t g_ios_pool_bytes = 0;
+
 static volatile uint32_t *df_l0va = NULL;
 static volatile int g_boot_logo_done = 0;
 static uint32_t g_boot_bar_ticks = 0;
@@ -635,14 +658,26 @@ IOReturn DFMobileFramebufferUC::externalMethod(
           DF_MFB_PHYS, (vm_size_t)DF_LCD_W * DF_LCD_H * 4);
     }
     s_swap_cnt++;
+    uint32_t s0 = 0;
+    if (a->structureInput && a->structureInputSize >= 0x60) {
+      s0 = *(uint32_t *)((uint8_t *)a->structureInput + 0x54);
+    }
+    const uint32_t *present_kva = g_sw_fb_kva;
+    if (s0 >= 1 && s0 < DF_IOS_MAX_SURFACES && g_ios_surfaces[s0].in_use &&
+        g_ios_surfaces[s0].kva &&
+        g_ios_surfaces[s0].width == DF_MFB_W &&
+        g_ios_surfaces[s0].height == DF_MFB_H &&
+        g_ios_surfaces[s0].bytes_per_row == DF_MFB_STRIDE_PX * 4) {
+      present_kva = g_ios_surfaces[s0].kva;
+    }
     uint32_t nonblack = 0;
     int gpu_done = 0;
     uint32_t nonzero = 0;
-    if (g_sw_fb_kva && df_fbva) {
+    if (present_kva && df_fbva) {
       size_t n = (size_t)DF_MFB_W * DF_MFB_H;
       if (!g_boot_logo_done || s_swap_cnt <= 10) {
         for (size_t i = 0; i < n; i++) {
-          uint32_t px = g_sw_fb_kva[i];
+          uint32_t px = present_kva[i];
           if (px != 0) {
             nonzero++;
             if ((px & 0x00ffffffU) != 0) {
@@ -657,19 +692,19 @@ IOReturn DFMobileFramebufferUC::externalMethod(
           }
         }
       }
-      if (g_boot_logo_done && df_mali_compose(g_sw_fb_kva) == 0) {
+      if (g_boot_logo_done && df_mali_compose(present_kva) == 0) {
         gpu_done = 1;   /* Mali-G52 composited native 1080x2400 (stride 4352 B) straight into LCD */
       } else if (g_boot_logo_done) {
         /* CPU fallback before Mali auto-arms: native 1:1 1080x2400 + true premultiplied alpha */
         volatile uint32_t *dst = df_fbva;
         for (uint32_t y = 0; y < DF_LCD_H; y++) {
-          const uint32_t *srow = g_sw_fb_kva + (size_t)y * DF_MFB_STRIDE_PX;
+          const uint32_t *srow = present_kva + (size_t)y * DF_MFB_STRIDE_PX;
           const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
           for (uint32_t x = 0; x < DF_LCD_W; x++) {
             uint32_t px = srow[x];
-            uint32_t a = (px >> 24) & 0xffu;
-            if (a < 255u) {
-              uint32_t w = wrow[x >> 1], k = 255u - a;
+            uint32_t a_ch = (px >> 24) & 0xffu;
+            if (a_ch < 255u) {
+              uint32_t w = wrow[x >> 1], k = 255u - a_ch;
               uint32_t r = ((px >> 16) & 0xffu) + ((((w >> 16) & 0xffu) * k) >> 8);
               uint32_t g = ((px >> 8) & 0xffu) + ((((w >> 8) & 0xffu) * k) >> 8);
               uint32_t b = (px & 0xffu) + (((w & 0xffu) * k) >> 8);
@@ -684,8 +719,6 @@ IOReturn DFMobileFramebufferUC::externalMethod(
       }
     }
     if (a->structureInput && a->structureInputSize >= 0x60) {
-      uint8_t *p = (uint8_t *)a->structureInput;
-      uint32_t s0 = *(uint32_t *)(p + 0x54);
       static uint32_t s_last_nb = 0;
       static uint32_t s_nb_logs = 0;
       int diff = (int)nonblack - (int)s_last_nb;
@@ -694,8 +727,8 @@ IOReturn DFMobileFramebufferUC::externalMethod(
         s_last_nb = nonblack;
         printf("mfb: SwapEnd #%u sid=%u nz=%u nb=%u [0]=0x%x [mid]=0x%x\n",
                s_swap_cnt, s0, nonzero, nonblack,
-               g_sw_fb_kva ? g_sw_fb_kva[0] : 0,
-               g_sw_fb_kva ? g_sw_fb_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
+               present_kva ? present_kva[0] : 0,
+               present_kva ? present_kva[(DF_MFB_W * DF_MFB_H) / 2] : 0);
       }
     }
     if (g_boot_logo_done && !gpu_done) {
@@ -719,10 +752,11 @@ IOReturn DFMobileFramebufferUC::clientClose(void) {
   return kIOReturnSuccess;
 }
 
-/* Probe IOCoreSurfaceRoot (IOSurface.framework's kernel service on iOS): logs
- * every selector
- * ("ios sel ...") and answers success with zeroed output. Not a working
- * IOSurface yet. */
+/* Multi-surface IOCoreSurfaceRoot (IOSurface.framework's kernel service on iOS).
+ * Slot 1 is the primary 1080x2400 display framebuffer (g_sw_fb_md).
+ * Slots 2..63 allocate independent cacheable RAM buffers for offscreen groups,
+ * backdrops, double-buffering, and App Switcher cards so backboardd never aliases
+ * an offscreen render target onto the live display framebuffer. */
 class IOCoreSurfaceRoot : public IOService {
   OSDeclareDefaultStructors(IOCoreSurfaceRoot);
 
@@ -736,8 +770,16 @@ class DFCoreSurfaceUC : public IOUserClient {
   OSDeclareDefaultStructors(DFCoreSurfaceUC);
   task_t fTask;
 
+  IOMemoryMap *fCommMap;
   mach_vm_address_t fUserAddr;
-  mach_vm_address_t fUserFbAddr;
+  IOMemoryMap *fMaps[DF_IOS_MAX_SURFACES];
+  mach_vm_address_t fMapAddr[DF_IOS_MAX_SURFACES];
+  uint32_t fMapRef[DF_IOS_MAX_SURFACES];
+  IOExternalTrap fTraps[6];
+
+  IOReturn ensureCommMapped(void);
+  IOReturn mapSlotLocked(uint32_t sid, mach_vm_address_t *out_va);
+  void releaseSlotLocked(uint32_t sid);
 
 public:
   virtual bool initWithTask(task_t owningTask, void *securityID,
@@ -747,6 +789,13 @@ public:
                                   IOExternalMethodDispatch *dispatch,
                                   OSObject *target,
                                   void *reference) APPLE_KEXT_OVERRIDE;
+  virtual IOExternalTrap *
+  getTargetAndTrapForIndex(IOService **targetP,
+                           UInt32 index) APPLE_KEXT_OVERRIDE;
+  IOReturn trapReleaseNoop(void *p1, void *p2, void *p3, void *p4, void *p5,
+                           void *p6);
+  IOReturn trapReleaseSurface(void *p1, void *p2, void *p3, void *p4, void *p5,
+                              void *p6);
   virtual IOReturn
   clientMemoryForType(UInt32 type, IOOptionBits *options,
                       IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
@@ -759,14 +808,282 @@ OSDefineMetaClassAndStructors(DFCoreSurfaceUC, IOUserClient);
 static unsigned df_ios_logs;
 static uint8_t s_iosurface_comm[16384] __attribute__((aligned(16384)));
 
+static bool df_ios_key_eq(const uint8_t *s, uint32_t slen, const char *lit) {
+  while (slen > 0 && s[slen - 1] == 0) {
+    slen--;
+  }
+  size_t llen = strlen(lit);
+  return slen == llen && memcmp(s, lit, llen) == 0;
+}
+
+static void df_ios_parse_props(const uint8_t *buf, size_t len, uint32_t *out_w,
+                               uint32_t *out_h, uint32_t *out_bpr,
+                               uint32_t *out_bpe, uint32_t *out_fmt,
+                               uint32_t *out_alloc) {
+  if (!buf || len < 8) {
+    return;
+  }
+  uint32_t magic = 0;
+  memcpy(&magic, buf, 4);
+  if (magic != 0x000000d3U) {
+    return;
+  }
+  size_t pos = 4;
+  while (pos + 4 <= len) {
+    uint32_t hdr = 0;
+    memcpy(&hdr, buf + pos, 4);
+    pos += 4;
+    uint32_t type = hdr & 0x7f000000U;
+    uint32_t slen = hdr & 0x00ffffffU;
+    if (type == 0x04000000U) { /* kOSSerializeNumber */
+      if (pos + 8 > len) {
+        break;
+      }
+      pos += 8;
+    } else if (type == 0x08000000U || type == 0x09000000U) { /* Symbol/String */
+      size_t padded = ((size_t)slen + 3U) & ~3UL;
+      if (padded > len - pos) {
+        break;
+      }
+      const uint8_t *kptr = buf + pos;
+      pos += padded;
+      if (pos + 12 <= len) {
+        uint32_t vhdr = 0;
+        memcpy(&vhdr, buf + pos, 4);
+        if ((vhdr & 0x7f000000U) == 0x04000000U) {
+          uint64_t val = 0;
+          memcpy(&val, buf + pos + 4, 8);
+          pos += 12;
+          if (df_ios_key_eq(kptr, slen, "IOSurfaceWidth")) {
+            *out_w = (uint32_t)val;
+          } else if (df_ios_key_eq(kptr, slen, "IOSurfaceHeight")) {
+            *out_h = (uint32_t)val;
+          } else if (df_ios_key_eq(kptr, slen, "IOSurfaceBytesPerRow")) {
+            *out_bpr = (uint32_t)val;
+          } else if (df_ios_key_eq(kptr, slen, "IOSurfaceBytesPerElement")) {
+            *out_bpe = (uint32_t)val;
+          } else if (df_ios_key_eq(kptr, slen, "IOSurfacePixelFormat")) {
+            *out_fmt = (uint32_t)val;
+          } else if (df_ios_key_eq(kptr, slen, "IOSurfaceAllocSize")) {
+            *out_alloc = (uint32_t)val;
+          }
+        }
+      }
+    } else if (type == 0x0a000000U) { /* kOSSerializeData */
+      size_t padded = ((size_t)slen + 3U) & ~3UL;
+      if (padded > len - pos) {
+        break;
+      }
+      pos += padded;
+    }
+  }
+}
+
+static bool df_ios_ensure_slot1_locked(void) {
+  if (g_ios_surfaces[1].in_use && g_ios_surfaces[1].md) {
+    return true;
+  }
+  uint32_t sz = (uint32_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4;
+  if (!g_sw_fb_md) {
+    g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
+        (vm_size_t)sz, page_size);
+    if (!g_sw_fb_md) {
+      return false;
+    }
+    g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
+    if (g_sw_fb_kva) {
+      bzero(g_sw_fb_kva, sz);
+    }
+    printf("ios: allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
+  }
+  DFIOSurfaceSlot *s = &g_ios_surfaces[1];
+  s->in_use = true;
+  s->width = DF_MFB_W;
+  s->height = DF_MFB_H;
+  s->bytes_per_row = DF_MFB_STRIDE_PX * 4;
+  s->bytes_per_elem = 4;
+  s->pixel_format = 0x42475241; /* 'BGRA' */
+  s->alloc_size = sz;
+  s->seed = 1;
+  s->refcnt = 1;
+  s->md = g_sw_fb_md;
+  s->kva = g_sw_fb_kva;
+  *(uint32_t *)(s_iosurface_comm + 256 + 0x0c) = 1;
+  *(uint32_t *)(s_iosurface_comm + 256 + 0x10) = 1;
+  return true;
+}
+
+static void df_ios_fill_out(uint8_t *out, uint32_t sid,
+                            const DFIOSurfaceSlot *s,
+                            mach_vm_address_t user_fb_addr,
+                            mach_vm_address_t user_comm_base) {
+  /* IOSurfaceClient copies out+0x00.. to client+0x68..:
+   *   out+0x00 -> client+0x68: BaseAddress
+   *   out+0x08 -> client+0x70: mapped comm page (seed @ +0x0c / +0x10)
+   *   out+0x18 -> client+0x80: surface_id
+   *   out+0x1c -> client+0x84: alloc_size
+   *   out+0x20 -> client+0x88: width
+   *   out+0x24 -> client+0x8c: height
+   *   out+0x28 -> client+0x90: bytes_per_row
+   *   out+0x2c -> client+0x94: offset (0)
+   *   out+0x30 -> client+0x98: pixel_format
+   *   out+0x38 -> client+0xa0: plane_count (0 = single-plane)
+   *   out+0x40 -> client+0xa8: bytes_per_element (uint16)
+   *   out+0x42 -> client+0xaa: element_width (uint8)
+   *   out+0x43 -> client+0xab: element_height (uint8) */
+  *(uint64_t *)(out + 0x00) = (uint64_t)user_fb_addr;
+  *(uint64_t *)(out + 0x08) = (uint64_t)(user_comm_base + (uint64_t)sid * 256U);
+  *(uint64_t *)(out + 0x10) = 0;
+  *(uint32_t *)(out + 0x18) = sid;
+  *(uint32_t *)(out + 0x1c) = s->alloc_size;
+  *(uint32_t *)(out + 0x20) = s->width;
+  *(uint32_t *)(out + 0x24) = s->height;
+  *(uint32_t *)(out + 0x28) = s->bytes_per_row;
+  *(uint32_t *)(out + 0x2c) = 0;
+  *(uint32_t *)(out + 0x30) = s->pixel_format;
+  *(uint32_t *)(out + 0x34) = 0;
+  *(uint32_t *)(out + 0x38) = 0;
+  *(uint16_t *)(out + 0x40) = (uint16_t)s->bytes_per_elem;
+  *(uint8_t *)(out + 0x42) = 1;
+  *(uint8_t *)(out + 0x43) = 1;
+  *(uint32_t *)(out + 0xdc) = 0;
+  *(uint32_t *)(out + 0x124) = 0;
+}
+
 bool DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID,
                                    UInt32 type) {
   if (!IOUserClient::initWithTask(owningTask, securityID, type))
     return false;
   fTask = owningTask;
+  fCommMap = NULL;
   fUserAddr = 0;
-  fUserFbAddr = 0;
+  bzero(fMaps, sizeof(fMaps));
+  bzero(fMapAddr, sizeof(fMapAddr));
+  bzero(fMapRef, sizeof(fMapRef));
+  bzero(fTraps, sizeof(fTraps));
+  fTraps[4].object = this;
+  fTraps[4].func =
+      OSMemberFunctionCast(IOTrap, this, &DFCoreSurfaceUC::trapReleaseNoop);
+  fTraps[5].object = this;
+  fTraps[5].func =
+      OSMemberFunctionCast(IOTrap, this, &DFCoreSurfaceUC::trapReleaseSurface);
   return true;
+}
+
+IOReturn DFCoreSurfaceUC::ensureCommMapped(void) {
+  if (fUserAddr) {
+    return kIOReturnSuccess;
+  }
+  task_t t = fTask ? fTask : current_task();
+  IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(
+      (mach_vm_address_t)s_iosurface_comm, sizeof(s_iosurface_comm),
+      kIODirectionInOut, kernel_task);
+  if (md) {
+    fCommMap = md->createMappingInTask(t, 0, kIOMapAnywhere);
+    if (fCommMap) {
+      fUserAddr = fCommMap->getAddress();
+    }
+    md->release();
+  }
+  if (!fUserAddr) {
+    vm_map_t map = t ? get_task_map(t) : NULL;
+    if (map) {
+      mach_vm_allocate(map, &fUserAddr, sizeof(s_iosurface_comm), 1);
+    }
+  }
+  return fUserAddr ? kIOReturnSuccess : kIOReturnNoMemory;
+}
+
+IOReturn DFCoreSurfaceUC::mapSlotLocked(uint32_t sid,
+                                        mach_vm_address_t *out_va) {
+  if (sid == 0 || sid >= DF_IOS_MAX_SURFACES || !g_ios_surfaces[sid].in_use ||
+      !g_ios_surfaces[sid].md) {
+    return kIOReturnNotFound;
+  }
+  if (!fMapAddr[sid]) {
+    task_t t = fTask ? fTask : current_task();
+    IOMemoryMap *m =
+        g_ios_surfaces[sid].md->createMappingInTask(t, 0, kIOMapAnywhere);
+    if (!m) {
+      return kIOReturnNoMemory;
+    }
+    fMaps[sid] = m;
+    fMapAddr[sid] = m->getAddress();
+  }
+  fMapRef[sid]++;
+  *out_va = fMapAddr[sid];
+  if (sid == 1) {
+    g_user_fb_addr = fMapAddr[1];
+  }
+  return kIOReturnSuccess;
+}
+
+void DFCoreSurfaceUC::releaseSlotLocked(uint32_t sid) {
+  if (sid < 2 || sid >= DF_IOS_MAX_SURFACES) {
+    return; /* never tear down primary display surface sid=1 */
+  }
+  if (fMapRef[sid] > 0) {
+    fMapRef[sid]--;
+    if (fMapRef[sid] == 0) {
+      if (fMaps[sid]) {
+        fMaps[sid]->release();
+        fMaps[sid] = NULL;
+      }
+      fMapAddr[sid] = 0;
+    }
+  }
+  DFIOSurfaceSlot *s = &g_ios_surfaces[sid];
+  if (s->in_use) {
+    s->refcnt--;
+    if (s->refcnt <= 0) {
+      if (s->md) {
+        s->md->release();
+      }
+      if (g_ios_pool_bytes >= s->alloc_size) {
+        g_ios_pool_bytes -= s->alloc_size;
+      } else {
+        g_ios_pool_bytes = 0;
+      }
+      bzero(s, sizeof(*s));
+    }
+  }
+}
+
+IOExternalTrap *
+DFCoreSurfaceUC::getTargetAndTrapForIndex(IOService **targetP, UInt32 index) {
+  if (index == 4 || index == 5) {
+    *targetP = this;
+    return &fTraps[index];
+  }
+  return IOUserClient::getTargetAndTrapForIndex(targetP, index);
+}
+
+IOReturn DFCoreSurfaceUC::trapReleaseNoop(void *p1, void *p2, void *p3,
+                                          void *p4, void *p5, void *p6) {
+  (void)p1;
+  (void)p2;
+  (void)p3;
+  (void)p4;
+  (void)p5;
+  (void)p6;
+  return kIOReturnSuccess;
+}
+
+IOReturn DFCoreSurfaceUC::trapReleaseSurface(void *p1, void *p2, void *p3,
+                                             void *p4, void *p5, void *p6) {
+  (void)p2;
+  (void)p3;
+  (void)p4;
+  (void)p5;
+  (void)p6;
+  uint32_t sid = (uint32_t)(uintptr_t)p1;
+  if (g_ios_lock) {
+    IOLockLock(g_ios_lock);
+    releaseSlotLocked(sid);
+    IOLockUnlock(g_ios_lock);
+  }
+  return kIOReturnSuccess;
 }
 
 IOReturn IOCoreSurfaceRoot::newUserClient(task_t owningTask, void *securityID,
@@ -820,13 +1137,12 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
     limits->version = 1;
     printf("ios: get_limits ok (ver=1)\n");
   }
-  if ((selector == 0 || selector == 34 || a->structureOutputSize >= 0xa68) &&
+  if ((selector == 0 || selector == 4 || selector == 34 ||
+       a->structureOutputSize >= 0xa68) &&
       a->structureOutput && a->structureOutputSize >= 0xa68) {
-    /* Only backboardd owns the single display IOSurface (g_sw_fb_md).
-     * Rejecting IOSurfaceCreate/Lookup for other processes (SpringBoard,
-     * SBRendererService, Preferences) makes UIKit/CPBitmap/QuartzCore fall
-     * back cleanly to CPU CGImage / CA::Render::Shmem instead of mapping and
-     * overwriting backboardd's live display framebuffer! */
+    /* Only backboardd allocates/looks up IOSurfaces here; other processes
+     * (SpringBoard, SBRendererService, Preferences) stay cleanly on CPU
+     * CGImage / CA::Render::Shmem without needing cross-process Mach ports. */
     const char *pname = NULL;
     if (kernproc != NULL && current_task() != kernel_task) {
       proc_t curp = current_proc();
@@ -842,112 +1158,169 @@ IOReturn DFCoreSurfaceUC::externalMethod(uint32_t selector,
       }
       return kIOReturnUnsupported;
     }
-    uint8_t *out = (uint8_t *)a->structureOutput;
-    task_t t = fTask ? fTask : current_task();
-    vm_map_t map = t ? get_task_map(t) : NULL;
-
-    if (!fUserAddr) {
-      *(uint32_t *)(s_iosurface_comm + 0x0c) = 1; /* seed at offset 0xc */
-      *(uint32_t *)(s_iosurface_comm + 0x10) = 1;
-      IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(
-          (mach_vm_address_t)s_iosurface_comm, sizeof(s_iosurface_comm),
-          kIODirectionInOut, kernel_task);
-      if (md) {
-        IOMemoryMap *m =
-            md->createMappingInTask(t ? t : current_task(), 0, kIOMapAnywhere);
-        if (m) {
-          fUserAddr = m->getAddress();
-        }
-        md->release();
-      }
-      if (!fUserAddr && map) {
-        mach_vm_allocate(map, &fUserAddr, 16384, 1);
-      }
+    if (!g_ios_lock) {
+      g_ios_lock = IOLockAlloc();
     }
-
-    /* Back IOSurface with normal cacheable RAM (1080x2400x4 = 10,368,000 bytes)
-     * so CA::OGL::SWContext can use NEON SIMD writes without Device-nGnRE
-     * alignment faults; SwapEnd blits scalar 32-bit pixels into df_fbva. */
-    if (!g_sw_fb_md) {
-      g_sw_fb_md = IOBufferMemoryDescriptor::inTaskWithOptions(
-          kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
-          (vm_size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4, page_size);
-      if (g_sw_fb_md) {
-        g_sw_fb_kva = (uint32_t *)g_sw_fb_md->getBytesNoCopy();
-        if (g_sw_fb_kva) {
-          bzero(g_sw_fb_kva, (size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4);
-        }
-        printf("ios: allocated SW RAM fb kva=%p\n", (void *)g_sw_fb_kva);
-      }
+    IOLockLock(g_ios_lock);
+    IOReturn kr = ensureCommMapped();
+    if (kr != kIOReturnSuccess) {
+      IOLockUnlock(g_ios_lock);
+      return kr;
     }
-    if (!fUserFbAddr) {
-      if (t && g_sw_fb_md) {
-        IOMemoryMap *fb_map =
-            g_sw_fb_md->createMappingInTask(t, 0, kIOMapAnywhere);
-        if (fb_map) {
-          fUserFbAddr = fb_map->getAddress();
+    uint32_t target_sid = 0;
+    if (selector == 0) {
+      /* Create a new independent IOSurface */
+      uint32_t req_w = 0, req_h = 0, req_bpr = 0, req_bpe = 0;
+      uint32_t req_fmt = 0x42475241; /* 'BGRA' */
+      uint32_t req_alloc = 0;
+      if (a->structureInput && a->structureInputSize > 0) {
+        df_ios_parse_props((const uint8_t *)a->structureInput,
+                           a->structureInputSize, &req_w, &req_h, &req_bpr,
+                           &req_bpe, &req_fmt, &req_alloc);
+      }
+      if (req_w == 0 || req_w > 8192) {
+        req_w = DF_MFB_W;
+      }
+      if (req_h == 0 || req_h > 8192) {
+        req_h = DF_MFB_H;
+      }
+      if (req_bpe == 0 || req_bpe > 16) {
+        if (req_fmt == 0x4c303038U || req_fmt == 0x41303038U) { /* L008/A008 */
+          req_bpe = 1;
+        } else if (req_fmt == 0x4c353635U || req_fmt == 0x4c353535U) {
+          req_bpe = 2;
+        } else if (req_fmt == 0x62363461U || req_fmt == 0x52476841U) {
+          req_bpe = 8;
+        } else {
+          req_bpe = 4;
         }
       }
-      if (!fUserFbAddr && map) {
-        mach_vm_allocate(map, &fUserFbAddr,
-                         (mach_vm_size_t)DF_MFB_STRIDE_PX * DF_MFB_H * 4, 1);
+      uint32_t min_bpr = req_w * req_bpe;
+      if (req_bpr < min_bpr) {
+        req_bpr = min_bpr;
       }
+      req_bpr = (req_bpr + 63U) & ~63U; /* 64-byte row alignment */
+      uint64_t calc_alloc = (uint64_t)req_bpr * (uint64_t)req_h;
+      if (req_alloc < calc_alloc) {
+        req_alloc = (uint32_t)calc_alloc;
+      }
+      if (req_alloc == 0 || req_alloc > (32u * 1024u * 1024u)) {
+        IOLockUnlock(g_ios_lock);
+        return kIOReturnNoMemory;
+      }
+      req_alloc = (uint32_t)(((uint64_t)req_alloc + page_size - 1U) &
+                             ~((uint64_t)page_size - 1U));
+
+      if (!g_ios_surfaces[1].in_use && req_w == DF_MFB_W && req_h == DF_MFB_H) {
+        if (!df_ios_ensure_slot1_locked()) {
+          IOLockUnlock(g_ios_lock);
+          return kIOReturnNoMemory;
+        }
+        target_sid = 1;
+      } else {
+        for (uint32_t i = 2; i < DF_IOS_MAX_SURFACES; i++) {
+          if (!g_ios_surfaces[i].in_use) {
+            target_sid = i;
+            break;
+          }
+        }
+        if (target_sid == 0 ||
+            g_ios_pool_bytes + req_alloc > DF_IOS_MAX_POOL_BYTES) {
+          printf("ios: pool exhausted (sid=%u used=%llu req=%u)\n", target_sid,
+                 (unsigned long long)g_ios_pool_bytes, req_alloc);
+          IOLockUnlock(g_ios_lock);
+          return kIOReturnNoMemory;
+        }
+        IOBufferMemoryDescriptor *md =
+            IOBufferMemoryDescriptor::inTaskWithOptions(
+                kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
+                (vm_size_t)req_alloc, page_size);
+        if (!md) {
+          IOLockUnlock(g_ios_lock);
+          return kIOReturnNoMemory;
+        }
+        uint32_t *kva = (uint32_t *)md->getBytesNoCopy();
+        if (kva) {
+          bzero(kva, req_alloc);
+        }
+        DFIOSurfaceSlot *s = &g_ios_surfaces[target_sid];
+        s->in_use = true;
+        s->width = req_w;
+        s->height = req_h;
+        s->bytes_per_row = req_bpr;
+        s->bytes_per_elem = req_bpe;
+        s->pixel_format = req_fmt;
+        s->alloc_size = req_alloc;
+        s->seed = 1;
+        s->refcnt = 1;
+        s->md = md;
+        s->kva = kva;
+        g_ios_pool_bytes += req_alloc;
+        *(uint32_t *)(s_iosurface_comm + target_sid * 256 + 0x0c) = 1;
+        *(uint32_t *)(s_iosurface_comm + target_sid * 256 + 0x10) = 1;
+      }
+    } else {
+      /* Lookup existing surface by id (sel 4 or sel 34) */
+      target_sid = (a->scalarInputCount >= 1 && a->scalarInput[0] != 0)
+                       ? (uint32_t)a->scalarInput[0]
+                       : 1;
+      if (target_sid == 1 && !g_ios_surfaces[1].in_use) {
+        if (!df_ios_ensure_slot1_locked()) {
+          IOLockUnlock(g_ios_lock);
+          return kIOReturnNoMemory;
+        }
+      }
+      if (target_sid == 0 || target_sid >= DF_IOS_MAX_SURFACES ||
+          !g_ios_surfaces[target_sid].in_use) {
+        IOLockUnlock(g_ios_lock);
+        return kIOReturnNotFound;
+      }
+      g_ios_surfaces[target_sid].refcnt++;
     }
 
-    mach_vm_address_t user_addr = fUserAddr;
-    mach_vm_address_t user_fb_addr = fUserFbAddr;
-    g_user_fb_addr = user_fb_addr;
-
-    uint32_t target_sid = 1;
-    if (a->scalarInputCount >= 1 && a->scalarInput[0] != 0) {
-      target_sid = (uint32_t)a->scalarInput[0];
+    mach_vm_address_t user_fb_addr = 0;
+    kr = mapSlotLocked(target_sid, &user_fb_addr);
+    if (kr != kIOReturnSuccess) {
+      if (target_sid >= 2) {
+        releaseSlotLocked(target_sid);
+      }
+      IOLockUnlock(g_ios_lock);
+      return kr;
     }
-
-    /* Fill IOSurface layout matching IOSurface.framework disassembly
-     * (IOSurfaceClient copies out+0x00.. to client+0x68..):
-     *   out+0x20 -> client+0x88: width
-     *   out+0x24 -> client+0x8c: height
-     *   out+0x28 -> client+0x90: bytes_per_row
-     *   out+0x2c -> client+0x94: base_offset
-     *   out+0x30 -> client+0x98: pixel_format ('BGRA')
-     *   out+0x38 -> client+0xa0: plane_count (0 = single-plane BGRA)
-     *   out+0x40 -> client+0xa8: bytes_per_element (4) */
-    *(uint64_t *)(out + 0x00) =
-        (uint64_t)user_fb_addr; /* BaseAddress (client+0x68) */
-    *(uint64_t *)(out + 0x08) = (uint64_t)
-        user_addr; /* mapped comm page (client+0x70) */
-    *(uint64_t *)(out + 0x10) = 0;          /* detach/plane pointer */
-    *(uint32_t *)(out + 0x18) = target_sid; /* surface_id (client+0x80) */
-    *(uint32_t *)(out + 0x1c) =
-        DF_MFB_STRIDE_PX * DF_MFB_H * 4;    /* alloc_size (client+0x84) */
-    *(uint32_t *)(out + 0x20) = DF_MFB_W;   /* width = 720 (client+0x88) */
-    *(uint32_t *)(out + 0x24) = DF_MFB_H;   /* height = 1600 (client+0x8c) */
-    *(uint32_t *)(out + 0x28) = DF_MFB_STRIDE_PX * 4; /* bytes_per_row = 2880 (client+0x90) */
-    *(uint32_t *)(out + 0x2c) = 0;          /* offset = 0 (client+0x94) */
-    *(uint32_t *)(out + 0x30) = 0x42475241; /* pixel_format = 'BGRA' (client+0x98) */
-    *(uint32_t *)(out + 0x34) = 0;          /* reserved (client+0x9c) */
-    *(uint32_t *)(out + 0x38) = 0;          /* plane_count = 0: single-plane BGRA (client+0xa0) */
-    *(uint16_t *)(out + 0x40) = 4;          /* bytes_per_element = 4 (client+0xa8) */
-    *(uint32_t *)(out + 0xdc) = 0;          /* plane 0 offset (alt) */
-    *(uint32_t *)(out + 0x124) = 0;         /* plane 0 format flag */
+    DFIOSurfaceSlot *s = &g_ios_surfaces[target_sid];
+    df_ios_fill_out((uint8_t *)a->structureOutput, target_sid, s, user_fb_addr,
+                    fUserAddr);
     if (a->scalarOutputCount >= 1) {
-      a->scalarOutput[0] = target_sid; /* surface_id */
+      a->scalarOutput[0] = target_sid;
     }
-    if (df_ios_logs <= 40) {
-      printf("ios: sel %u -> id %u, fb=0x%llx, comm=0x%llx\n", selector,
-             target_sid, (uint64_t)user_fb_addr, (uint64_t)user_addr);
+    static unsigned s_create_logs = 0;
+    if (s_create_logs++ < 40) {
+      printf("ios: sel %u -> id %u (%ux%u bpr=%u bpe=%u fmt=0x%x sz=%u) "
+             "fb=0x%llx\n",
+             selector, target_sid, s->width, s->height, s->bytes_per_row,
+             s->bytes_per_elem, s->pixel_format, s->alloc_size,
+             (uint64_t)user_fb_addr);
     }
+    IOLockUnlock(g_ios_lock);
   }
   if (selector == 9) {
-    static uint32_t s_seed = 1;
-    s_seed = (s_seed + 2) | 3;
-    *(uint32_t *)(s_iosurface_comm + 0x0c) = s_seed;
-    *(uint32_t *)(s_iosurface_comm + 0x10) = s_seed;
+    uint32_t sid = 1;
+    if (a->structureInput && a->structureInputSize >= 4) {
+      uint32_t in_sid = 0;
+      memcpy(&in_sid, a->structureInput, 4);
+      if (in_sid >= 1 && in_sid < DF_IOS_MAX_SURFACES) {
+        sid = in_sid;
+      }
+    }
+    uint32_t seed = (g_ios_surfaces[sid].seed + 2U) | 3U;
+    g_ios_surfaces[sid].seed = seed;
+    *(uint32_t *)(s_iosurface_comm + sid * 256 + 0x0c) = seed;
+    *(uint32_t *)(s_iosurface_comm + sid * 256 + 0x10) = seed;
     if (a->structureOutput && a->structureOutputSize >= 4) {
-      *(uint32_t *)a->structureOutput = s_seed;
+      *(uint32_t *)a->structureOutput = seed;
     }
     if (df_ios_logs <= 40) {
-      printf("ios: sel 9 (set_value) -> seed=%u\n", s_seed);
+      printf("ios: sel 9 (set_value) sid=%u -> seed=%u\n", sid, seed);
     }
   }
   if (selector == 27 && df_ios_logs <= 40) {
@@ -966,6 +1339,29 @@ IOReturn DFCoreSurfaceUC::clientMemoryForType(UInt32 type,
 }
 
 IOReturn DFCoreSurfaceUC::clientClose(void) {
+  if (g_ios_lock) {
+    IOLockLock(g_ios_lock);
+    for (uint32_t i = 1; i < DF_IOS_MAX_SURFACES; i++) {
+      while (fMapRef[i] > 0) {
+        if (i == 1) {
+          fMapRef[1] = 0;
+          if (fMaps[1]) {
+            fMaps[1]->release();
+            fMaps[1] = NULL;
+          }
+          fMapAddr[1] = 0;
+        } else {
+          releaseSlotLocked(i);
+        }
+      }
+    }
+    if (fCommMap) {
+      fCommMap->release();
+      fCommMap = NULL;
+    }
+    fUserAddr = 0;
+    IOLockUnlock(g_ios_lock);
+  }
   terminate();
   return kIOReturnSuccess;
 }
@@ -1029,6 +1425,9 @@ extern "C" void df_path_log(const char *path) {
 extern "C" void df_hid_attach(IOService *provider);
 
 extern "C" void df_mfb_attach(IOService *provider) {
+  if (!g_ios_lock) {
+    g_ios_lock = IOLockAlloc();
+  }
   IOCoreSurfaceRoot *sr = OSTypeAlloc(IOCoreSurfaceRoot);
   if (sr && sr->init() && sr->attach(provider) && sr->start(provider)) {
     sr->registerService();

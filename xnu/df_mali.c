@@ -618,17 +618,26 @@ dfm_comp_build(const uint32_t *swfb)
 		for (unsigned i = 0; i < n; i++) {
 			blobk[i] = src[i];
 		}
-		printf("mali: comp variant %d: %s\n", dfm_comp_solid, dfm_var_name[dfm_comp_solid]);
+		static unsigned s_build_logs = 0;
+		if (s_build_logs < 5) {
+			printf("mali: comp variant %d: %s\n", dfm_comp_solid, dfm_var_name[dfm_comp_solid]);
+		}
+		s_build_logs++;
 	}
 	int e = 0;
 	e |= dfm_map_kva(DF_MALI_BLOB_VA, blobk, 0x2000);
-	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, (uint64_t)DFM_SW_STRIDE * DFM_SW_H); /* 720x1600 @ 2880 B */
+	e |= dfm_map_kva(DF_MALI_SWFB_VA, swfb, (uint64_t)DFM_SW_STRIDE * DFM_SW_H); /* native 1080x2400 @ 4352 B */
 	e |= dfm_map_kva(DF_MALI_WALL_VA, df_wall_px, 544ULL * 1200 * 4);
 	e |= dfm_map_block_gb(DFM_FB_PA);
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_mem));
 	e |= dfm_map_block_gb(ml_vtophys((vm_offset_t)dfm_heap));
-	printf("mali: comp tables %s, %u KB used, pt pa 0x%llx, regs %u\n", e ? "FAILED" : "ok",
-	    dfm_pt_used >> 10, dfm_pt_pa, DF_MALI_WORK_REGS);
+	{
+		static unsigned s_tbl_logs = 0;
+		if (e || s_tbl_logs++ < 5) {
+			printf("mali: comp tables %s, %u KB used, pt pa 0x%llx, regs %u\n", e ? "FAILED" : "ok",
+			    dfm_pt_used >> 10, dfm_pt_pa, DF_MALI_WORK_REGS);
+		}
+	}
 	if (e) {
 		return -1;
 	}
@@ -636,7 +645,10 @@ dfm_comp_build(const uint32_t *swfb)
 	dfm_clean(dfm_mem, sizeof(dfm_mem));
 	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_LO, (uint32_t)dfm_pt_pa);
 	dfm_w(dfm_gpu, AS0 + AS_TRANSTAB_HI, (uint32_t)(dfm_pt_pa >> 32));
-	return dfm_as_cmd(1 /* UPDATE */);
+	if (dfm_as_cmd(1 /* UPDATE */)) {
+		return -1;
+	}
+	return dfm_as_cmd(4 /* FLUSH_PT */);
 }
 
 /* Called from SwapEnd (df_mfb.cpp). 0 = GPU drew the frame, -1 = use the CPU path. */

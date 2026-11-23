@@ -963,11 +963,9 @@ bool DFCoreSurfaceUC::initWithTask(task_t owningTask, void *securityID,
   bzero(fMapRef, sizeof(fMapRef));
   bzero(fTraps, sizeof(fTraps));
   fTraps[4].object = this;
-  fTraps[4].func =
-      OSMemberFunctionCast(IOTrap, this, &DFCoreSurfaceUC::trapReleaseNoop);
+  fTraps[4].func = static_cast<IOTrap>(&DFCoreSurfaceUC::trapReleaseNoop);
   fTraps[5].object = this;
-  fTraps[5].func =
-      OSMemberFunctionCast(IOTrap, this, &DFCoreSurfaceUC::trapReleaseSurface);
+  fTraps[5].func = static_cast<IOTrap>(&DFCoreSurfaceUC::trapReleaseSurface);
   return true;
 }
 

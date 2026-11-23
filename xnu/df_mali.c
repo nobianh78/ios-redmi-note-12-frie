@@ -373,9 +373,9 @@ df_mali_hello(void)
 #define DFM_FB_PA         0x7ce6a000ULL
 #define DFM_FB_W          1080
 #define DFM_FB_H          2400
-#define DFM_SW_W          720
-#define DFM_SW_H          1600
-#define DFM_SW_STRIDE     (DFM_SW_W * 4)   /* 2880 B = 45 * 64 B, natively 64B-aligned */
+#define DFM_SW_W          1080
+#define DFM_SW_H          2400
+#define DFM_SW_STRIDE     (1088 * 4)       /* 4352 B = 68 * 64 B, natively 64B-aligned */
 
 static uint64_t dfm_l2_gb[3];
 static int dfm_l2_n;
@@ -515,7 +515,7 @@ df_mali_frag(void)
  * framebuffer runs the shader on every pixel (Pre Frame 0 = Always) and writes the LCD directly.
  */
 extern const uint32_t df_wall_px[];
-static uint8_t dfm_pt[0x10000] __attribute__((aligned(0x4000)));   /* L1 + L2s + L3s */
+static uint8_t dfm_pt[0x14000] __attribute__((aligned(0x4000)));   /* L1 + L2s + L3s (80 KB) */
 static unsigned dfm_pt_used;
 static uint64_t dfm_pt_pa;
 static int dfm_comp_state;          /* 0 off, 1 armed (after Ctrl-P), 2 tables built, -1 failed */

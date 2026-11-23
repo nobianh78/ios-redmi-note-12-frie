@@ -31,13 +31,13 @@ mach_msg_send_from_kernel_proper(mach_msg_header_t *msg,
 
 #define DF_MFB_PHYS 0x7ce6a000ULL
 /* Physical LCD panel buffer is 1080x2400 (top of 1080x2460 display);
- * iOS renders at 720x1600 @2x (= 360x800 pt, identical UI layout, 2880 B 64B-aligned stride)
- * and the Mali-G52 GPU compositor upscales bilinearly to 1080x2400 in hardware. */
+ * iOS renders natively at 1080x2400 @3x (= 360x800 pt, razor-sharp 1:1 pixels) with
+ * stride 1088 px (4352 B = 68 * 64 B, natively 64-byte aligned for Mali-G52!). */
 #define DF_LCD_W 1080
 #define DF_LCD_H 2400
-#define DF_MFB_W 720
-#define DF_MFB_H 1600
-#define DF_MFB_STRIDE_PX 720    /* 2880 B = 45 * 64 B: natively 64-byte aligned for Mali-G52! */
+#define DF_MFB_W 1080
+#define DF_MFB_H 2400
+#define DF_MFB_STRIDE_PX 1088   /* 4352 B = 68 * 64 B: natively 64-byte aligned for Mali-G52! */
 #define DF_L0_PHYS 0x7c430000ULL
 #define DF_L0_STRIDE 4352
 #define DF_L0_H 2460
@@ -658,16 +658,15 @@ IOReturn DFMobileFramebufferUC::externalMethod(
         }
       }
       if (g_boot_logo_done && df_mali_compose(g_sw_fb_kva) == 0) {
-        gpu_done = 1;   /* Mali-G52 upscaled 720x1600 -> 1080x2400 straight into LCD */
+        gpu_done = 1;   /* Mali-G52 composited native 1080x2400 (stride 4352 B) straight into LCD */
       } else if (g_boot_logo_done) {
-        /* CPU fallback before Mali auto-arms: 1.5x upscale + true premultiplied alpha */
+        /* CPU fallback before Mali auto-arms: native 1:1 1080x2400 + true premultiplied alpha */
         volatile uint32_t *dst = df_fbva;
         for (uint32_t y = 0; y < DF_LCD_H; y++) {
-          uint32_t sy = (y * 2u) / 3u;
-          const uint32_t *srow = g_sw_fb_kva + (size_t)sy * DF_MFB_STRIDE_PX;
+          const uint32_t *srow = g_sw_fb_kva + (size_t)y * DF_MFB_STRIDE_PX;
           const uint32_t *wrow = &df_wall_px[(y >> 1) * DF_WALL_W];
           for (uint32_t x = 0; x < DF_LCD_W; x++) {
-            uint32_t px = srow[(x * 2u) / 3u];
+            uint32_t px = srow[x];
             uint32_t a = (px >> 24) & 0xffu;
             if (a < 255u) {
               uint32_t w = wrow[x >> 1], k = 255u - a;

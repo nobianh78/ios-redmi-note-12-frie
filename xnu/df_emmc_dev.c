@@ -260,7 +260,7 @@ df_sc_dump(void)
 
 /* Writes to the root never reach the card: they land in a RAM copy-on-write overlay of 4 KB pages
  * (lost at reboot). Open-addressing table page -> 4 KB buffer, filled from the eMMC on first write. */
-#define DFE_OV_SLOTS (1u << 14)   /* up to 16K pages = 64 MB of changed data (256 KB tables) */
+#define DFE_OV_SLOTS (1u << 16)   /* up to 64K slots (48K pages = 192 MB RAM overlay, avoids ENOSPC) */
 static uint64_t *dfe_ov_key;     /* page + 1, 0 = empty */
 static uint8_t **dfe_ov_val;
 static uint32_t dfe_ov_n;
@@ -287,7 +287,7 @@ dfe_ov_find(uint64_t page, int create)
 			return NULL;
 		}
 	}
-	uint32_t h = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 50) & (DFE_OV_SLOTS - 1);
+	uint32_t h = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) & (DFE_OV_SLOTS - 1);
 	for (uint32_t i = 0; i < DFE_OV_SLOTS; i++, h = (h + 1) & (DFE_OV_SLOTS - 1)) {
 		if (dfe_ov_key[h] == page + 1) {
 			return dfe_ov_val[h];
@@ -305,7 +305,7 @@ dfe_ov_find(uint64_t page, int create)
 					return NULL;
 				}
 				/* Re-probe after re-acquiring dfe_mtx */
-				uint32_t h2 = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 50) & (DFE_OV_SLOTS - 1);
+				uint32_t h2 = (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) & (DFE_OV_SLOTS - 1);
 				for (uint32_t j = 0; j < DFE_OV_SLOTS; j++, h2 = (h2 + 1) & (DFE_OV_SLOTS - 1)) {
 					if (dfe_ov_key[h2] == page + 1) {
 						kfree_data(v, 4096);

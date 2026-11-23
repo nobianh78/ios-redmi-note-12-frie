@@ -8,10 +8,15 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/arm/thread_status.h>
+#include <mach-o/dyld_images.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
 
 @interface LSApplicationProxy : NSObject
 - (NSString *)applicationIdentifier;
@@ -150,6 +155,72 @@ static void write_plist(NSString *rel, uid_t uid, gid_t gid, mode_t mode, NSDict
     chmod(full.UTF8String, mode);
 }
 
+static BOOL unpack_zlib_file(const char *src_path, const char *dst_path, uid_t uid, gid_t gid, mode_t mode, size_t *out_sz)
+{
+    NSData *z = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:src_path]];
+    if (!z || z.length < 16) return NO;
+    const uint8_t *zb = (const uint8_t *)z.bytes;
+    // Format: 8-byte little-endian uncompressed length followed by zlib stream
+    uint64_t raw_len = 0;
+    memcpy(&raw_len, zb, 8);
+    if (raw_len == 0 || raw_len > 32 * 1024 * 1024) return NO;
+    NSMutableData *raw = [NSMutableData dataWithLength:(NSUInteger)raw_len];
+    if (!raw) return NO;
+    uLongf dest_len = (uLongf)raw_len;
+    int rc = uncompress((Bytef *)raw.mutableBytes, &dest_len, zb + 8, (uLong)(z.length - 8));
+    if (rc != Z_OK || dest_len != raw_len) return NO;
+    if (![raw writeToFile:[NSString stringWithUTF8String:dst_path] atomically:NO]) return NO;
+    chown(dst_path, uid, gid);
+    chmod(dst_path, mode);
+    if (out_sz) *out_sz = (size_t)dest_len;
+    return YES;
+}
+
+static void seed_prebaked_ls_csstore(void)
+{
+    // Pre-baked container metadata & compressed .csstore blobs stored in unused DemoApp dummy files
+    NSString *metaSrc = @"/Applications/DemoApp.app/LaunchImage-800-Portrait-736h@3x.png";
+    const char *sysSrc  = "/Applications/DemoApp.app/LaunchImage-700@2x.png";
+    const char *mainSrc = "/Applications/DemoApp.app/LaunchImage-800-667h@2x.png";
+    NSData *metaData = [NSData dataWithContentsOfFile:metaSrc];
+    if (!metaData || metaData.length < 64) return;
+    NSDictionary *meta = [NSPropertyListSerialization propertyListWithData:metaData options:0 format:nil error:nil];
+    NSString *uuid = [meta isKindOfClass:[NSDictionary class]] ? meta[@"MCMMetadataUUID"] : nil;
+    if (![uuid isKindOfClass:[NSString class]] || uuid.length < 8) return;
+
+    NSString *base = [@"/private/var/mobile/Containers/Data/InternalDaemon" stringByAppendingPathComponent:uuid];
+    NSString *caches = [base stringByAppendingPathComponent:@"Library/Caches"];
+    NSString *mainDst = [caches stringByAppendingPathComponent:@"com.apple.LaunchServices-4035-v2.csstore"];
+    struct stat st;
+    if (stat(mainDst.UTF8String, &st) == 0 && st.st_size > 100000) return;
+
+    NSArray<NSString *> *dirs = @[
+        base,
+        [base stringByAppendingPathComponent:@"Documents"],
+        [base stringByAppendingPathComponent:@"Library"],
+        caches,
+        [caches stringByAppendingPathComponent:@"OpenOperationStaging"],
+        [base stringByAppendingPathComponent:@"SystemData"],
+        [base stringByAppendingPathComponent:@"tmp"],
+    ];
+    for (NSString *d in dirs) {
+        mkdir(d.UTF8String, 0755);
+        chown(d.UTF8String, 501, 501);
+        chmod(d.UTF8String, 0755);
+    }
+    NSString *metaDst = [base stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+    [metaData writeToFile:metaDst atomically:NO];
+    chown(metaDst.UTF8String, 501, 501);
+    chmod(metaDst.UTF8String, 0644);
+
+    NSString *sysDst = [caches stringByAppendingPathComponent:@"SystemDataOnly-com.apple.LaunchServices-4035-v2.csstore"];
+    size_t sz1 = 0, sz2 = 0;
+    BOOL ok1 = unpack_zlib_file(sysSrc, sysDst.UTF8String, 501, 501, 0660, &sz1);
+    BOOL ok2 = unpack_zlib_file(mainSrc, mainDst.UTF8String, 501, 501, 0660, &sz2);
+    out([NSString stringWithFormat:@"dfuicache: seeded prebaked LS csstore (%@, sys=%d/%zuB, main=%d/%zuB)",
+         uuid, ok1, sz1, ok2, sz2]);
+}
+
 static void run_seed(void)
 {
     int created = 0;
@@ -163,6 +234,9 @@ static void run_seed(void)
         chown(path, kSeedDirs[i].uid, kSeedDirs[i].gid);
         chmod(path, kSeedDirs[i].mode);
     }
+
+    // Unpack pre-baked LaunchServices .csstore FIRST (takes <0.3s, well before lsd spawns!)
+    seed_prebaked_ls_csstore();
 
     NSString *buildVer = @"20H392";
     NSDictionary *migrationDict = @{
@@ -374,12 +448,130 @@ static int run_register(BOOL rebuild)
     return 0;
 }
 
+static int run_z64(const char *path, int start_chunk, int end_chunk)
+{
+    NSData *raw = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:path]];
+    if (!raw) {
+        fprintf(stdout, "Z64_ERR open %s\n", path);
+        fflush(stdout);
+        return 1;
+    }
+    uLong orig_crc = crc32(0L, Z_NULL, 0);
+    orig_crc = crc32(orig_crc, (const Bytef *)raw.bytes, (uInt)raw.length);
+    uLongf comp_cap = compressBound((uLong)raw.length);
+    NSMutableData *comp = [NSMutableData dataWithLength:(NSUInteger)comp_cap];
+    int rc = compress2((Bytef *)comp.mutableBytes, &comp_cap, (const Bytef *)raw.bytes, (uLong)raw.length, 6);
+    if (rc != Z_OK) {
+        fprintf(stdout, "Z64_ERR compress %d\n", rc);
+        fflush(stdout);
+        return 1;
+    }
+    const size_t kChunk = 768; // -> 1024 base64 chars per line
+    int total = (int)((comp_cap + kChunk - 1) / kChunk);
+    if (start_chunk < 0) start_chunk = 0;
+    if (end_chunk < 0 || end_chunk > total) end_chunk = total;
+    fprintf(stdout, "Z64_BEGIN %lu %lu %08lx %d\n",
+            (unsigned long)raw.length, (unsigned long)comp_cap, (unsigned long)orig_crc, total);
+    fflush(stdout);
+    const uint8_t *cb = (const uint8_t *)comp.bytes;
+    for (int i = start_chunk; i < end_chunk; i++) {
+        size_t off = (size_t)i * kChunk;
+        size_t len = (off + kChunk <= comp_cap) ? kChunk : (comp_cap - off);
+        uLong ccrc = crc32(0L, cb + off, (uInt)len);
+        NSData *slice = [NSData dataWithBytesNoCopy:(void *)(cb + off) length:len freeWhenDone:NO];
+        NSString *b64 = [slice base64EncodedStringWithOptions:0];
+        fprintf(stdout, "Z64 %d %08lx %s\n", i, (unsigned long)ccrc, b64.UTF8String);
+        fflush(stdout);
+        usleep(22000); // ~47 KB/s, well under 102 KB/s USB CDC ring limit
+    }
+    fprintf(stdout, "Z64_END\n");
+    fflush(stdout);
+    return 0;
+}
+
+static int run_sample(pid_t pid, int iters)
+{
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stdout, "SAMPLE_ERR task_for_pid(%d)=0x%x\n", pid, kr);
+        fflush(stdout);
+        return 1;
+    }
+    struct task_dyld_info dyld_info;
+    mach_msg_type_number_t dcnt = TASK_DYLD_INFO_COUNT;
+    uint64_t dsc_slide = 0;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&dyld_info, &dcnt) == KERN_SUCCESS &&
+        dyld_info.all_image_info_addr) {
+        struct dyld_all_image_infos aii;
+        vm_size_t outsz = 0;
+        memset(&aii, 0, sizeof(aii));
+        if (vm_read_overwrite(task, (vm_address_t)dyld_info.all_image_info_addr,
+                              sizeof(aii), (vm_address_t)&aii, &outsz) == KERN_SUCCESS) {
+            dsc_slide = (uint64_t)aii.sharedCacheSlide;
+        }
+    }
+    fprintf(stdout, "SAMPLE_BEGIN pid=%d dsc_slide=0x%llx\n", pid, (unsigned long long)dsc_slide);
+    for (int it = 0; it < iters; it++) {
+        thread_act_array_t threads = NULL;
+        mach_msg_type_number_t tcnt = 0;
+        if (task_threads(task, &threads, &tcnt) != KERN_SUCCESS) break;
+        for (mach_msg_type_number_t i = 0; i < tcnt; i++) {
+            thread_basic_info_data_t bi;
+            mach_msg_type_number_t bic = THREAD_BASIC_INFO_COUNT;
+            int cpu = -1, rs = -1;
+            if (thread_info(threads[i], THREAD_BASIC_INFO, (thread_info_t)&bi, &bic) == KERN_SUCCESS) {
+                cpu = bi.cpu_usage;
+                rs = bi.run_state;
+            }
+            arm_thread_state64_t st;
+            mach_msg_type_number_t sc = ARM_THREAD_STATE64_COUNT;
+            memset(&st, 0, sizeof(st));
+            if (thread_get_state(threads[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sc) == KERN_SUCCESS) {
+                uint64_t pc = (uint64_t)arm_thread_state64_get_pc(st);
+                uint64_t lr = (uint64_t)arm_thread_state64_get_lr(st);
+                uint64_t fp = (uint64_t)arm_thread_state64_get_fp(st);
+                uint64_t f0[2] = {0, 0}, f1[2] = {0, 0};
+                vm_size_t osz = 0;
+                if (fp && vm_read_overwrite(task, (vm_address_t)fp, 16, (vm_address_t)f0, &osz) == KERN_SUCCESS && f0[0]) {
+                    vm_read_overwrite(task, (vm_address_t)f0[0], 16, (vm_address_t)f1, &osz);
+                }
+                if (cpu > 0 || rs == TH_STATE_RUNNING || it == 0) {
+                    fprintf(stdout, "S[%d] t%u cpu=%d rs=%d pc=0x%llx lr=0x%llx bt1=0x%llx bt2=0x%llx\n",
+                            it, i, cpu, rs,
+                            (unsigned long long)(pc - dsc_slide),
+                            (unsigned long long)(lr - dsc_slide),
+                            (unsigned long long)(f0[1] ? f0[1] - dsc_slide : 0),
+                            (unsigned long long)(f1[1] ? f1[1] - dsc_slide : 0));
+                }
+            }
+            mach_port_deallocate(mach_task_self(), threads[i]);
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)threads, tcnt * sizeof(thread_act_t));
+        fflush(stdout);
+        if (it + 1 < iters) usleep(100000);
+    }
+    fprintf(stdout, "SAMPLE_END\n");
+    fflush(stdout);
+    mach_port_deallocate(mach_task_self(), task);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     @autoreleasepool {
         if (argc > 1 && !strcmp(argv[1], "seed")) {
             run_seed();
             return 0;
+        }
+        if (argc > 2 && !strcmp(argv[1], "z64")) {
+            int s = (argc > 3) ? atoi(argv[3]) : 0;
+            int e = (argc > 4) ? atoi(argv[4]) : -1;
+            return run_z64(argv[2], s, e);
+        }
+        if (argc > 2 && !strcmp(argv[1], "sample")) {
+            int iters = (argc > 3) ? atoi(argv[3]) : 5;
+            return run_sample((pid_t)atoi(argv[2]), iters);
         }
         if (argc > 1 && !strcmp(argv[1], "boot")) {
             run_seed();

@@ -16,7 +16,7 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
-            -fobjc-arc -O2 -framework Foundation -framework UIKit -framework MobileCoreServices \
+            -fobjc-arc -O2 -lz -framework Foundation -framework UIKit -framework MobileCoreServices \
             -o dfuicache tools/dfuicache/dfuicache.m
           codesign -f -s - --entitlements tools/dfuicache/entitlements.plist dfuicache
           file dfuicache

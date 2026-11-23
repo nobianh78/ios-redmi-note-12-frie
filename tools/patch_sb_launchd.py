@@ -161,6 +161,31 @@ def main():
         # ChronoServices (.05): disable tight reconnect loop to absent com.apple.chronoservices (was burning 100% CPU in SpringBoard + launchd!)
         (0x192123a4c, struct.pack('<I', 0xd65f03c0), '-[CHSChronoServicesConnection _queue_createConnection] -> ret'),
         (0x19212c0ec, struct.pack('<I', 0xd65f03c0), '-[CHSWidgetEventServicePublisher/Tool _queue_createConnection] -> ret'),
+        # Sleep.framework (.11): disable tight reconnect loop to absent com.apple.sleepd.sleepserver
+        # (was burning 155% CPU in SpringBoard main+worker threads + 36% CPU in launchd, starving lsd & slowing UI!)
+        (0x1a3b5dd18, struct.pack('<II', 0xd2800000, 0xd65f03c0), '-[HKSPXPCConnectionProvider connection] -> return nil'),
+        (0x1a3ba2128, struct.pack('<I', 0xd65f03c0), '-[HKSPXPCConnectionProvider _didInvalidateConnection] -> ret'),
+        (0x1a3ba1ffc, struct.pack('<I', 0xd65f03c0), '-[HKSPXPCConnectionProvider _didInterruptConnection] -> ret'),
+        (0x1a3ba1b8c, struct.pack('<I', 0xd65f03c0), '-[HKSPXPCConnectionProvider _retryPendingMessages] -> ret'),
+        (0x1a3b81934, struct.pack('<I', 0xd65f03c0), '-[HKSPSleepStore reconnect] -> ret'),
+        # DataMigration.framework (.21): bypass migration checks/runs (saves 2x ~11s = 22s of com.apple.datamigrator boot wait)
+        (0x1c790a298, struct.pack('<II', 0x52800000, 0xd65f03c0), 'DMIsMigrationNeeded -> return 0'),
+        (0x1c790cd10, struct.pack('<II', 0x52800000, 0xd65f03c0), 'DMPerformMigrationIfNeeded -> return 0'),
+        (0x1c790cd64, struct.pack('<II', 0x52800000, 0xd65f03c0), 'DMPerformMigration -> return 0'),
+        (0x1c790cb38, struct.pack('<II', 0x52800000, 0xd65f03c0), 'DMPerformMigrationReturningAfterPlugin -> return 0'),
+        (0x1c790ca10, struct.pack('<II', 0x52800000, 0xd65f03c0), 'DMGetUserDataDisposition -> return 0'),
+        # UserManagement.framework (.05): return stable persona generation=1 and empty persona list without
+        # synchronous XPC to absent com.apple.mobile.usermanagerd.xpc (stops lsd _LSPersonaDatabase cache miss loop)
+        (0x1920ef088, struct.pack('<IIII', 0xb4000042, 0xf900005f, 0xd2800020, 0xd65f03c0),
+         '-[UMUserManager personaGenerationIdentifierWithError:] -> *err=nil; return 1'),
+        (0x1920fb400, struct.pack('<II', 0xd2800000, 0xd65f03c0),
+         '-[UMUserManager listAllPersonaWithAttributes] -> return nil (no 3x usermanagerd XPC retry)'),
+        (0x1920f05e8, struct.pack('<IIII', 0xb4000042, 0xf900005f, 0xd2800000, 0xd65f03c0),
+         '-[UMUserManager listAllPersonaAttributesWithError:] -> *err=nil; return nil'),
+        (0x1920f1000, struct.pack('<IIII', 0xb4000042, 0xf900005f, 0xd2800000, 0xd65f03c0),
+         '-[UMXPCServer fetchListOfPersonasSynchronousWithError:] -> *err=nil; return nil'),
+        (0x1920f0b2c, struct.pack('<IIII', 0xb4000043, 0xf900007f, 0xd2800000, 0xd65f03c0),
+         '-[UMXPCServer fetchPersonaSynchronous:WithError:] -> *err=nil; return nil'),
         # CoreFoundation (.03): __CFGetProductName() AND its 6 inlined CFBundle call sites all invoke
         # dispatch_once block __CFGetProductName_block_invoke @ 0x186ec82bc (storing into [0x1e1d48300]).
         # Patch BOTH the dispatch_once block (0x186ec82bc) AND __CFGetProductName (0x186ed0168) to set/return
@@ -271,6 +296,13 @@ def main():
             d['KeepAlive'] = True
         else:
             d['RunAtLoad'] = False
+        if dp.endswith(('com.apple.lsd.plist', 'com.apple.lsd.system.plist')):
+            # Prevent Adaptive/Background throttling (low-priority-cpu=4 & THROTTLE_LEVEL_TIER2 I/O)
+            # so initial LaunchServices .csstore seeding runs at full CPU/eMMC speed!
+            d['POSIXSpawnType'] = 'Interactive'
+            d['ProcessType'] = 'Interactive'
+            d['LowPriorityIO'] = False
+            d['LowPriorityBackgroundIO'] = False
         lp['LaunchDaemons'][dp] = d
 
     # Seed /private/var dirs (90 dirs) + 12 iOS 16.7.16 (20H392) prefs at boot
